@@ -1,0 +1,88 @@
+version: '3.8'
+
+services:
+  liminal:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: liminal:latest
+    container_name: liminal-system
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=0
+      - LIMINAL_CONFIG_FILE=/app/config/default.yaml
+      - LIMINAL_LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./config:/app/config
+    ports:
+      - "5000:5000"  # Monitoring dashboard
+      - "8000:8000"  # API endpoint
+    networks:
+      - liminal-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  liminal-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    image: liminal:dev
+    container_name: liminal-dev
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=0
+      - LIMINAL_CONFIG_FILE=/app/config/dev.yaml
+      - LIMINAL_LOG_LEVEL=DEBUG
+      - JUPYTER_ENABLE_LAB=yes
+    volumes:
+      - .:/app  # Mount entire project for development
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+    ports:
+      - "5001:5000"  # Monitoring dashboard (dev)
+      - "8001:8000"  # API endpoint (dev)
+      - "8888:8888"  # Jupyter Lab
+    networks:
+      - liminal-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    profiles:
+      - dev
+
+  redis:
+    image: redis:7-alpine
+    container_name: liminal-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - liminal-network
+    profiles:
+      - full
+
+networks:
+  liminal-network:
+    driver: bridge
+
+volumes:
+  redis-data:

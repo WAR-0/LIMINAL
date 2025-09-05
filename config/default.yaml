@@ -1,0 +1,105 @@
+# LIMINAL Default Configuration
+# Physics-Based Memory Architecture for LLMs
+
+system:
+  debug: false
+  log_level: INFO
+  log_file: logs/liminal.log
+  random_seed: 42
+
+physics:
+  field_resolution: [256, 256]
+  update_frequency: 10  # Hz
+  timestep: 0.1  # seconds
+  damping_coefficient: 0.05
+  wave_speed: 1.0
+  boundary_conditions: periodic
+  gpu_acceleration: true
+  
+  # Screened Poisson parameters
+  kappa: 1.0  # Screening parameter
+  alpha: 1.0  # Source strength
+
+interface:
+  projection_method: umap  # umap, tsne, or custom
+  
+  # UMAP parameters
+  n_neighbors: 15
+  min_dist: 0.1
+  metric: cosine
+  
+  # Validation thresholds
+  semantic_threshold_global: 0.4
+  semantic_threshold_local: 0.6
+  
+  # Real-time monitoring
+  monitoring_enabled: true
+  monitoring_frequency: 1.0  # Hz
+  
+  # Fallback configuration
+  fallback_enabled: true
+  fallback_threshold: 0.3
+
+memory:
+  consolidation_enabled: true
+  consolidation_threshold: 0.8
+  max_snapshots: 100
+  compression_target: 15
+  
+  # LoRA parameters
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.1
+
+llm:
+  model_name: "Qwen/Qwen2.5-7B"
+  model_cache_dir: "./models"
+  device: "cuda"
+  dtype: "float16"
+  
+  # Generation parameters
+  max_length: 2048
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+  
+  # Context management
+  context_length: 8192
+  sliding_window: 4096
+
+monitoring:
+  dashboard_enabled: true
+  dashboard_port: 5000
+  api_enabled: true
+  api_port: 8000
+  
+  # Metrics collection
+  collect_physics_metrics: true
+  collect_llm_metrics: true
+  collect_memory_metrics: true
+  
+  # Visualization
+  field_visualization: true
+  attention_visualization: true
+  topology_visualization: true
+  
+  # Update frequencies (Hz)
+  metrics_update_frequency: 1.0
+  visualization_update_frequency: 5.0
+
+performance:
+  # Resource limits
+  max_gpu_memory_gb: 8.0
+  max_cpu_threads: 8
+  max_field_history: 1000
+  
+  # Optimization
+  use_mixed_precision: true
+  use_gradient_checkpointing: false
+  compile_model: false  # PyTorch 2.0 compile
+
+experimental:
+  # Consciousness research features (disabled by default)
+  consciousness_metrics_enabled: false
+  phi_calculation_enabled: false
+  emergence_detection_enabled: false
