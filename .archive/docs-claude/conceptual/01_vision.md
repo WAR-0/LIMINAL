@@ -1,0 +1,216 @@
+# LIMINAL Vision: From Human Message Bus to AI Team Director
+
+## The Problem: Developers as Human Routers
+
+Today's multi-agent AI development resembles a chaotic orchestra where the human developer has become the conductor, message carrier, context provider, and instrument tuner all at once. Developers juggle 4-6 terminal windows, manually copy context between AI assistants, wait for serial responses, and constantly switch between coordination and implementation. The human has become the bottleneck – a biological message bus in what should be an automated system.
+
+This isn't how senior developers work together. When a team tackles a complex feature, they don't queue behind a single coordinator. They claim territories, work in parallel, discuss asynchronously, and reach consensus through collaboration. LIMINAL transforms AI agents from command-driven tools into a collaborative development team that works the way humans actually work.
+
+## The Paradigm Shift: Unified Message Router Architecture
+
+LIMINAL eliminates the human bottleneck through a revolutionary **Unified Message Router** – a high-performance Rust engine that acts as the central nervous system for agent collaboration. Unlike traditional MCP-based approaches that rely on point-to-point connections, LIMINAL's router creates a shared communication fabric where agents can:
+
+- **Work autonomously** without blocking each other
+- **Coordinate through soft leases** rather than hard locks
+- **Discuss asynchronously** via clone-based parallel threads
+- **Reach consensus** through structured negotiation
+- **Respect territories** while maintaining flexibility
+
+### The Router Advantage
+
+The Unified Message Router isn't just a message queue – it's an intelligent orchestration layer that understands:
+
+1. **Message Priority**: Critical coordination messages jump ahead of informational updates
+2. **Natural Pause Points**: Messages are delivered between agent tasks, not mid-execution
+3. **Territory Boundaries**: Routes work based on current leases and ownership
+4. **Clone Management**: Spawns and manages parallel discussion threads
+5. **Consensus Building**: Tracks agreement protocols and resolution
+
+## Real-World Analogy: Your Team's Digital Workspace
+
+Imagine your development team working in a modern office:
+
+- **Slack for Communication**: Agents send messages that queue for natural reading points
+- **Conference Rooms for Discussion**: Clones meet to resolve conflicts without stopping main work
+- **Git for Territory**: Agents claim branches/files with soft locks that can be negotiated
+- **Kanban for Visibility**: Every action is trackable and understandable
+
+LIMINAL recreates this environment digitally. Agents don't interrupt each other mid-thought. They post messages, spawn discussions, claim territories, and collaborate – just like senior developers.
+
+## The Director Partnership: AI and Human Roles
+
+In LIMINAL, the development process is guided by a clear partnership between the **AI Director Agent** and the **Human Director**, each with distinct responsibilities and decision-making authority.
+
+### The AI Director Agent Handles:
+- **Plan Generation**: Breaking down high-level goals into executable task sequences
+- **Task Decomposition**: Creating detailed work items for specialized agents
+- **Low-Priority Arbitration**: Resolving routine conflicts and resource contentions
+- **Progress Monitoring**: Tracking task completion and identifying bottlenecks
+- **Queue Management**: Optimizing task distribution across available agents
+
+### The Human Director Handles:
+- **Goal Setting**: Defining the strategic vision and project objectives
+- **Plan Approval**: Reviewing and approving AI-generated execution plans
+- **Strategic Intervention**: Making critical architectural and design decisions
+- **Quality Gates**: Final review and approval of integrated work
+- **Escalation Resolution**: Handling conflicts that exceed AI authority
+
+### Handoff Points and Escalation Triggers
+
+The system defines clear boundaries for when control transfers between AI and Human Directors:
+
+**Automatic Escalation to Human Director:**
+- Lease conflicts with >2 agents queued (configurable via `lease_conflict_escalation_threshold`)
+- Consensus deadlock exceeding timeout (configurable via `human_escalation_timeout`, default: 5 minutes)
+- Critical priority messages from any agent
+- Architectural decisions affecting system-wide patterns
+- Security or compliance-related changes
+
+**Human Director Override Capabilities:**
+- Force lease transfers between agents
+- Terminate stuck discussions
+- Modify AI-generated plans before execution
+- Inject high-priority tasks
+- Pause/resume entire system
+
+## Why Async Collaboration Beats Synchronous Blocking
+
+Traditional agent systems force synchronous communication – one agent must stop and wait for another's response. This creates cascading delays and idle time. LIMINAL's async model means:
+
+1. **No Idle Agents**: Primary agents continue working while clones discuss
+2. **Parallel Resolution**: Multiple discussions can happen simultaneously
+3. **Natural Integration**: Consensus merges at convenient pause points
+4. **Efficient Throughput**: System throughput isn't limited by communication latency
+
+Consider this scenario: Frontend agent needs to discuss API contracts with Backend agent. In traditional systems, both stop working. In LIMINAL:
+- Frontend spawns a clone with current context
+- Clone sends discussion request to Backend
+- Backend spawns clone at next natural pause
+- Clones discuss in parallel thread
+- Both primaries continue working
+- Consensus is applied when convenient
+
+## Territory Leasing: Soft Coordination at Scale
+
+LIMINAL introduces **Territory Leasing** – a revolutionary approach to resource coordination borrowed from distributed systems and adapted for AI collaboration:
+
+```rust
+// Agents coordinate through temporary, negotiable leases
+acquire_lease("src/api/users.rs", Duration::minutes(15)) -> LeaseId
+extend_lease(lease_id, Duration::minutes(10)) -> Result
+request_lease_transfer(holder: "backend_agent", reason: "Need to add integration tests") -> Response
+```
+
+Leases are:
+- **Temporary**: Auto-expire to prevent deadlocks
+- **Negotiable**: Agents can request transfers with justification
+- **Visible**: UI shows current territory map in real-time
+- **Overridable**: Humans can always intervene
+
+This soft coordination eliminates the rigid locking of traditional systems while preventing chaos. It's like calling "dibs" on a file – respected but not absolute.
+
+## Implementation Simplicity Through Proven Patterns
+
+LIMINAL doesn't reinvent the wheel. It adapts battle-tested patterns from the UNCAN project:
+
+### From UNCAN We Inherit:
+- **Arc<RwLock> State Management**: High-read, low-write optimization perfect for agent status
+- **PTY Process Control**: Robust agent lifecycle management
+- **Event Stream Parsing**: Reliable structured communication over text streams
+- **Tauri Architecture**: Proven desktop application framework
+- **React Component Patterns**: Tested UI/UX approaches
+
+### What LIMINAL Simplifies:
+- **2D Instead of 3D**: Simpler physics, faster calculations
+- **Territory Focus**: Clear ownership model vs. swarm chaos
+- **Turn-Based Workflow**: Structured progression vs. continuous motion
+- **Smaller Scope**: Orchestration-only vs. full development environment
+
+## The User Experience Revolution
+
+LIMINAL transforms the developer experience from chaos to clarity:
+
+### Before LIMINAL:
+- 6 terminal windows
+- Mental context switching every 30 seconds
+- Copy-paste fatigue
+- Serial task execution
+- Constant coordination overhead
+- No visibility into agent thinking
+
+### After LIMINAL:
+- Single unified cockpit
+- Automated context routing
+- Parallel execution
+- Visual progress tracking
+- Intervention-only interaction
+- Full audit trail
+
+## Technical Innovation: MCP as Tool Layer
+
+While others use MCP as a communication protocol, LIMINAL uses it as a **tool exposure layer**. The router's capabilities are exposed as MCP tools:
+
+```typescript
+// Agents see router functions as tools, not protocols
+mcp.use_tool("send_message", { to: "frontend", content: "API schema updated" })
+mcp.use_tool("acquire_lease", { resource: "database/schema.sql", duration: 600 })
+mcp.use_tool("spawn_clone", { context: currentState, purpose: "discuss_api_design" })
+```
+
+This abstraction means:
+- Agents don't know about the router's internals
+- Communication patterns can evolve without agent changes
+- Standard MCP clients work out-of-the-box
+- The router can optimize message delivery behind the scenes
+
+## Market Differentiation
+
+LIMINAL occupies a unique position in the AI development tools landscape:
+
+| Aspect | Traditional Tools | LIMINAL |
+|--------|------------------|---------|
+| **Architecture** | Point-to-point connections | Unified message router |
+| **Coordination** | Hard locks or chaos | Soft territory leases |
+| **Communication** | Synchronous blocking | Async clone discussions |
+| **Human Role** | Message bus | Team director |
+| **Visibility** | Terminal logs | Visual cockpit |
+| **Parallelism** | Limited or none | Native parallel execution |
+
+## The Path Forward
+
+LIMINAL represents a fundamental shift in how we think about AI-assisted development. Instead of faster terminals or smarter agents, we need better orchestration. Instead of more powerful individual agents, we need better collaboration. Instead of humans in the loop, we need humans as directors.
+
+The future of development isn't a single super-intelligent AI – it's a team of specialized agents working together under human direction, communicating efficiently, respecting boundaries, and delivering results in parallel.
+
+## Success Metrics
+
+LIMINAL succeeds when:
+
+1. **Development velocity increases 5-10x** through parallel execution
+2. **Context switching drops 90%** through automated routing
+3. **Human cognitive load decreases 75%** through visual monitoring
+4. **Error rates drop 50%** through agent consensus and validation
+5. **Developers feel like directors**, not message carriers
+
+## Call to Action
+
+The age of human-bottlenecked AI development must end. LIMINAL isn't just a tool – it's a new way of working with AI. It's the difference between conducting an orchestra with hand signals and having a team that plays in harmony.
+
+Join us in building the future where developers direct AI teams, not serve as their communication infrastructure.
+
+---
+
+*"The best tools disappear into the workflow. LIMINAL makes the coordination invisible, the parallelism automatic, and the human contribution strategic rather than tactical."*
+
+## Technical Manifesto
+
+We believe:
+- **Agents should work like developers**, not servants
+- **Communication should be async**, not blocking
+- **Coordination should be soft**, not rigid
+- **Territories should be negotiated**, not fought over
+- **Humans should direct**, not route messages
+- **Visibility should be total**, not fragmented
+- **Integration should be continuous**, not batched
+
+LIMINAL is the embodiment of these beliefs – a system that respects both human creativity and AI capability, bringing them together in a symphony of parallel productivity.

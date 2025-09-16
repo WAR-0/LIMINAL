@@ -1,0 +1,195 @@
+# LIMINAL Canonical Configuration
+# This file is the single source of truth for all system parameters.
+
+# ------------------------------------------------------------------------------
+# Director Agent Configuration (`00_overview.md`)
+# ------------------------------------------------------------------------------
+# Defines the capabilities, authority, and responsibilities of the AI Director Agent.
+director_agent_config:
+  # Authority limits for the Director Agent.
+  authority:
+    # The highest message priority the Director Agent can issue. It cannot issue Critical messages.
+    max_priority: Blocking
+    # Whether the Director Agent can forcibly break a lease held by another agent.
+    lease_override: false
+    # The delay the Director Agent must wait before escalating a non-critical issue.
+    escalation_delay: 60s
+
+  # Core responsibilities of the Director Agent.
+  responsibilities:
+    - plan_generation:
+        # Maximum number of tasks in a single generated plan.
+        max_tasks: 50
+        # Maximum depth of the task hierarchy (e.g., tasks with sub-tasks).
+        max_depth: 3
+        # Whether the generated plan requires approval from the Human Director before execution.
+        requires_approval: true  # HANDOFF POINT
+
+    - conflict_resolution:
+        # Maximum number of attempts to resolve a conflict between agents before escalating.
+        max_attempts: 2
+        # Timeout for a conflict resolution discussion.
+        timeout: 120s
+        # Number of deadlocked agents that triggers an escalation.
+        escalate_after: 2
+
+    - progress_monitoring:
+        # Interval for reporting overall progress to the Human Director.
+        report_interval: 300s  # 5 minute updates
+        # Time an agent can be blocked before the Director Agent sends an alert.
+        alert_on_blocked: 60s
+
+# ------------------------------------------------------------------------------
+# Human Director Escalation Triggers (`00_overview.md`)
+# ------------------------------------------------------------------------------
+# Defines the conditions under which the system automatically escalates to the Human Director.
+escalation_triggers:
+  # Automatic triggers based on system state.
+  automatic:
+    # Escalates if agents are deadlocked for more than this duration.
+    - deadlock_duration: 60s
+    # Escalates if this many agents are waiting for the same resource.
+    - queue_depth: 2
+    # Escalates if conflict resolution fails this many times.
+    - conflict_attempts: 2
+    # Escalates if priority inflation (gaming the priority system) is detected.
+    - priority_inflation: true
+    # Escalates if a clone discussion fails to reach consensus within this timeout.
+    - consensus_timeout: 300s
+
+  # Triggers requested by an agent.
+  agent_requested:
+    # Immediate escalation for critical errors like build or test failures.
+    - critical_error: immediate
+    # Escalation after a short delay if a requirement is ambiguous.
+    - ambiguous_requirement: 30s
+    # Immediate escalation if a proposed change impacts the core architecture.
+    - architectural_change: immediate
+    # Escalation if an external dependency requires human authorization (e.g., API keys).
+    - external_dependency: 60s
+
+# ------------------------------------------------------------------------------
+# Territory and Lease Configuration (`00_overview.md`)
+# ------------------------------------------------------------------------------
+# Parameters governing the Territory Leasing system.
+territory_config:
+  # The default duration for a newly acquired lease.
+  default_lease_duration: 900s      # 15 minutes
+  # The absolute maximum duration a lease can be held.
+  max_lease_duration: 3600s         # 1 hour
+  # If a lease has less than this time remaining, the system may try to auto-extend it.
+  auto_extend_threshold: 60s
+
+  # Parameters for lease negotiation between agents.
+  negotiation:
+    # Timeout for a negotiation discussion.
+    timeout: 30s
+    # Maximum number of back-and-forth rounds in a negotiation before escalating.
+    max_rounds: 3
+
+  # Parameters for escalating lease conflicts.
+  escalation:
+    # Number of agents waiting for a resource that triggers an escalation.
+    queue_threshold: 2
+    # Duration a deadlock must persist before it is escalated.
+    deadlock_timeout: 60s
+
+  # Parameters to ensure fairness and prevent agent starvation.
+  fairness:
+    # Time an agent can wait for a resource before the situation is escalated.
+    starvation_threshold: 600s      # 10 minutes
+    # Time after which a waiting agent's request priority is boosted.
+    priority_boost_after: 300s      # 5 minutes
+
+# ------------------------------------------------------------------------------
+# System Health KPIs (`01_agent_capabilities.md`)
+# ------------------------------------------------------------------------------
+# Key Performance Indicators for monitoring overall system health.
+health_monitoring_kpis:
+  # Agent utilization targets.
+  utilization:
+    target: 85-90%
+    warning_threshold: < 70%
+    critical_threshold: < 50%
+
+  # Message routing latency targets.
+  message_latency:
+    p50_target: 0.5ms
+    p99_target: 1ms
+    p999_target: 5ms
+
+  # Message queue health thresholds.
+  queue_health:
+    max_depth: 100
+    warning_depth: 50
+    stale_threshold: 60s
+
+  # Escalation rate thresholds.
+  escalation_rate:
+    normal: < 1/min
+    warning: 1-5/min
+    critical: > 5/min
+
+  # Consensus success rate targets.
+  consensus_success:
+    target: > 90%
+    warning: 70-90%
+    critical: < 70%
+
+  # Deadlock frequency targets.
+  deadlock_frequency:
+    target: 0
+    warning: 1-2/hour
+    critical: > 2/hour
+
+# ------------------------------------------------------------------------------
+# Agent Priority Privileges (`03_interaction_model.md`)
+# ------------------------------------------------------------------------------
+# Defines the maximum priority level different types of agents can use.
+agent_privileges:
+  director:
+    max_priority: DirectorOverride
+    can_override_leases: true
+    can_force_escalation: true
+    quota_multiplier: unlimited
+
+  primary_agents:  # Frontend, Backend, Testing, Reviewer
+    max_priority: Critical
+    can_override_leases: false
+    can_force_escalation: false
+    quota_multiplier: 1.0
+
+  clone_agents:
+    max_priority: Coordinate
+    can_override_leases: false
+    can_force_escalation: false
+    quota_multiplier: 0.5
+
+# ------------------------------------------------------------------------------
+# Performance SLAs (`03_interaction_model.md`)
+# ------------------------------------------------------------------------------
+# Service Level Agreements for core system performance.
+performance_slas:
+  message_routing:
+    p50: 0.5ms
+    p99: 1ms
+    p999: 5ms
+
+  priority_preemption:
+    critical_delivery: <10ms
+    blocking_delivery: <50ms
+    coordinate_delivery: <100ms
+
+  escalation_detection:
+    check_interval: 100ms
+    escalation_latency: <500ms
+
+  deadlock_detection:
+    check_interval: 1s
+    resolution_time: <5s
+
+  queue_depths:
+    critical_max: 10
+    blocking_max: 50
+    coordinate_max: 200
+    info_max: 1000
