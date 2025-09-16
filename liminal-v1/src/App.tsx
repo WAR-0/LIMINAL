@@ -1,11 +1,13 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/tauri";
+import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
 function App() {
   const [agentAStatus, setAgentAStatus] = useState("Idle");
   const [agentBStatus, setAgentBStatus] = useState("Idle");
   const [messages, setMessages] = useState<string[]>([]);
+  const [isRunning, setIsRunning] = useState(false);
 
   useEffect(() => {
     const updateAgentStatus = async () => {
@@ -16,11 +18,47 @@ function App() {
     };
 
     updateAgentStatus();
+
+    // Set up event listeners
+    const unlistenStatus = listen<string>("agent_status", (event) => {
+      const payload = event.payload;
+      if (payload.includes("Agent A:")) {
+        setAgentAStatus(payload.replace("Agent A: ", ""));
+      } else if (payload.includes("Agent B:")) {
+        setAgentBStatus(payload.replace("Agent B: ", ""));
+      }
+    });
+
+    const unlistenLog = listen<string>("message_log", (event) => {
+      setMessages((prev) => [...prev, event.payload]);
+    });
+
+    const unlistenComplete = listen<string>("scenario_complete", (event) => {
+      setMessages((prev) => [...prev, `\n${event.payload}`]);
+      setIsRunning(false);
+    });
+
+    // Cleanup listeners on unmount
+    return () => {
+      unlistenStatus.then((f) => f());
+      unlistenLog.then((f) => f());
+      unlistenComplete.then((f) => f());
+    };
   }, []);
 
-  const handleStartScenario = () => {
-    invoke("start_scenario");
-    setMessages(prev => [...prev, "Scenario started..."]);
+  const handleStartScenario = async () => {
+    setIsRunning(true);
+    setMessages(["Starting scenario..."]);
+    setAgentAStatus("Idle");
+    setAgentBStatus("Idle");
+
+    try {
+      await invoke("start_scenario");
+    } catch (error) {
+      console.error("Error starting scenario:", error);
+      setMessages((prev) => [...prev, `Error: ${error}`]);
+      setIsRunning(false);
+    }
   };
 
   return (
@@ -28,8 +66,12 @@ function App() {
       <h1>LIMINAL V1 MVP</h1>
 
       <div className="control-panel">
-        <button onClick={handleStartScenario} className="start-button">
-          Start Scenario
+        <button
+          onClick={handleStartScenario}
+          className="start-button"
+          disabled={isRunning}
+        >
+          {isRunning ? "Running..." : "Start Scenario"}
         </button>
       </div>
 

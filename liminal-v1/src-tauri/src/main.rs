@@ -4,12 +4,111 @@ mod agent;
 mod router;
 mod territory;
 
-use router::UnifiedMessageRouter;
+use router::{Message, Priority, UnifiedMessageRouter};
+use tauri::Manager;
 use territory::TerritoryManager;
 
 #[tauri::command]
-fn start_scenario() {
-    println!("Scenario started!");
+async fn start_scenario(
+    router: tauri::State<'_, UnifiedMessageRouter>,
+    territory_manager: tauri::State<'_, TerritoryManager>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    println!("V1 Hardcoded Scenario Started!");
+
+    let agent_a_id = "Agent_A".to_string();
+    let agent_b_id = "Agent_B".to_string();
+    let resource = "shared_file.txt".to_string();
+
+    // --- Agent A's Turn ---
+    // 1. Acquire lease
+    let acquired = territory_manager.acquire_lease(&agent_a_id, &resource);
+    app_handle
+        .emit_all(
+            "agent_status",
+            format!(
+                "Agent A: acquiring lease on {}. Success: {}",
+                resource, acquired
+            ),
+        )
+        .unwrap();
+
+    if acquired {
+        // 2. Send message
+        let msg = Message {
+            content: "Hello from Agent A! I have the lease.".to_string(),
+            priority: Priority::Coordinate,
+            sender: agent_a_id.clone(),
+            recipient: agent_b_id.clone(),
+        };
+
+        // Route the message
+        router.route_message(msg.clone()).await;
+
+        app_handle
+            .emit_all(
+                "message_log",
+                format!("[{}->{}]: {}", msg.sender, msg.recipient, msg.content),
+            )
+            .unwrap();
+
+        // 3. Release lease
+        territory_manager.release_lease(&agent_a_id, &resource);
+        app_handle
+            .emit_all(
+                "agent_status",
+                format!("Agent A: released lease on {}.", resource),
+            )
+            .unwrap();
+    }
+
+    // --- Agent B's Turn ---
+    // 1. Acquire lease
+    let acquired_b = territory_manager.acquire_lease(&agent_b_id, &resource);
+    app_handle
+        .emit_all(
+            "agent_status",
+            format!(
+                "Agent B: acquiring lease on {}. Success: {}",
+                resource, acquired_b
+            ),
+        )
+        .unwrap();
+
+    if acquired_b {
+        // 2. Send message
+        let msg = Message {
+            content: "Hello from Agent B! I have acquired the lease now.".to_string(),
+            priority: Priority::Coordinate,
+            sender: agent_b_id.clone(),
+            recipient: agent_a_id.clone(),
+        };
+
+        // Route the message
+        router.route_message(msg.clone()).await;
+
+        app_handle
+            .emit_all(
+                "message_log",
+                format!("[{}->{}]: {}", msg.sender, msg.recipient, msg.content),
+            )
+            .unwrap();
+
+        // 3. Release lease
+        territory_manager.release_lease(&agent_b_id, &resource);
+        app_handle
+            .emit_all(
+                "agent_status",
+                format!("Agent B: released lease on {}.", resource),
+            )
+            .unwrap();
+    }
+
+    app_handle
+        .emit_all("scenario_complete", "Scenario Finished.")
+        .unwrap();
+
+    Ok(())
 }
 
 #[tauri::command]

@@ -10,6 +10,7 @@ pub enum Priority {
     Critical = 3,   // System failures, alerts
 }
 
+#[derive(Clone)]
 pub struct Message {
     pub content: String,
     pub priority: Priority,
