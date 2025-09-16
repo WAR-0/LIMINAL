@@ -5,7 +5,7 @@ mod router;
 mod territory;
 
 use router::{Message, Priority, UnifiedMessageRouter};
-use tauri::Manager;
+use tauri::Emitter;
 use territory::TerritoryManager;
 
 #[tauri::command]
@@ -24,7 +24,7 @@ async fn start_scenario(
     // 1. Acquire lease
     let acquired = territory_manager.acquire_lease(&agent_a_id, &resource);
     app_handle
-        .emit_all(
+        .emit(
             "agent_status",
             format!(
                 "Agent A: acquiring lease on {}. Success: {}",
@@ -46,7 +46,7 @@ async fn start_scenario(
         router.route_message(msg.clone()).await;
 
         app_handle
-            .emit_all(
+            .emit(
                 "message_log",
                 format!("[{}->{}]: {}", msg.sender, msg.recipient, msg.content),
             )
@@ -55,7 +55,7 @@ async fn start_scenario(
         // 3. Release lease
         territory_manager.release_lease(&agent_a_id, &resource);
         app_handle
-            .emit_all(
+            .emit(
                 "agent_status",
                 format!("Agent A: released lease on {}.", resource),
             )
@@ -66,7 +66,7 @@ async fn start_scenario(
     // 1. Acquire lease
     let acquired_b = territory_manager.acquire_lease(&agent_b_id, &resource);
     app_handle
-        .emit_all(
+        .emit(
             "agent_status",
             format!(
                 "Agent B: acquiring lease on {}. Success: {}",
@@ -88,7 +88,7 @@ async fn start_scenario(
         router.route_message(msg.clone()).await;
 
         app_handle
-            .emit_all(
+            .emit(
                 "message_log",
                 format!("[{}->{}]: {}", msg.sender, msg.recipient, msg.content),
             )
@@ -97,7 +97,7 @@ async fn start_scenario(
         // 3. Release lease
         territory_manager.release_lease(&agent_b_id, &resource);
         app_handle
-            .emit_all(
+            .emit(
                 "agent_status",
                 format!("Agent B: released lease on {}.", resource),
             )
@@ -105,7 +105,7 @@ async fn start_scenario(
     }
 
     app_handle
-        .emit_all("scenario_complete", "Scenario Finished.")
+        .emit("scenario_complete", "Scenario Finished.")
         .unwrap();
 
     Ok(())

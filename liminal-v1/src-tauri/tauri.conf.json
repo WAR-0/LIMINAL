@@ -1,40 +1,31 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
+  "productName": "liminal-v1",
+  "version": "0.1.0",
+  "identifier": "com.liminal.v1",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
-    "devPath": "http://localhost:1420",
-    "distDir": "../dist"
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
   },
-  "package": {
-    "productName": "liminal-v1",
-    "version": "0.1.0"
-  },
-  "tauri": {
-    "allowlist": {
-      "all": false,
-      "shell": {
-        "all": false,
-        "open": true
-      }
-    },
-    "bundle": {
-      "active": true,
-      "targets": "all",
-      "identifier": "com.liminal.v1",
-      "icon": []
-    },
+  "app": {
     "security": {
       "csp": null
     },
     "windows": [
       {
-        "fullscreen": false,
-        "resizable": true,
         "title": "LIMINAL V1",
         "width": 1200,
-        "height": 800
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false
       }
     ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": []
   }
 }
