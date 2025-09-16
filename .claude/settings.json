@@ -1,0 +1,51 @@
+{
+  "model": "claude-opus-4-1-20250805",
+  "allowedTools": [
+    "Read",
+    "Write",
+    "Bash",
+    "ListFiles"
+  ],
+  "permissions": {
+    "allow": [
+      "Bash(cargo fmt*)",
+      "Bash(cargo clippy*)",
+      "Bash(cargo test*)",
+      "Bash(cargo build*)",
+      "Bash(npm run*)",
+      "Read(**/*)",
+      "Write(liminal-v1/**/*)",
+      "Write(docs-canonical/**/*)",
+      "Write(runbooks/**/*)"
+    ],
+    "deny": [
+      "Write(.env*)",
+      "Write(target/**)",
+      "Write(node_modules/**)",
+      "Write(dist/**)",
+      "Write(.git/**)",
+      "Bash(git push*)",
+      "Bash(rm -rf*)"
+    ]
+  },
+  "env": {
+    "RUST_BACKTRACE": "1",
+    "RUST_LOG": "debug"
+  },
+  "hooks": {
+    "postWrite": [
+      {
+        "pattern": "**/*.rs",
+        "command": "cargo fmt -- $FILE"
+      },
+      {
+        "pattern": "**/*.{ts,tsx}",
+        "command": "npx prettier --write $FILE"
+      }
+    ],
+    "preCommit": {
+      "command": "cargo test && npm test"
+    }
+  },
+  "spinnerTipsEnabled": false
+}
