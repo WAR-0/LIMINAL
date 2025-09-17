@@ -39,4 +39,15 @@ impl UnifiedMessageRouter {
         let mut queue = self.message_queues[queue_idx].write().await;
         queue.push_back(msg);
     }
+
+    pub async fn get_pending_messages(&self) -> Vec<Message> {
+        let mut messages = Vec::new();
+
+        for priority in (0..4).rev() {
+            let queue = self.message_queues[priority].read().await;
+            messages.extend(queue.iter().cloned());
+        }
+
+        messages
+    }
 }
