@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tauri::Emitter;
-use territory::TerritoryManager;
+use territory::{LeaseDecision, LeaseRequest, TerritoryManager};
 
 #[tauri::command]
 async fn start_scenario(
@@ -30,8 +30,20 @@ async fn start_scenario(
     // --- Agent A's Turn ---
     // 1. Acquire lease
     let lease_start = Instant::now();
-    let acquired = territory_manager.acquire_lease(&agent_a_id, &resource);
-    metrics.record_lease_acquisition(lease_start.elapsed().as_millis() as f64);
+    let decision = territory_manager
+        .acquire_lease(LeaseRequest::new(
+            agent_a_id.clone(),
+            resource.clone(),
+            Priority::Coordinate,
+        ))
+        .await;
+    let acquired = matches!(
+        decision,
+        LeaseDecision::Granted(_) | LeaseDecision::Overridden { .. }
+    );
+    if acquired {
+        metrics.record_lease_acquisition(lease_start.elapsed().as_millis() as f64);
+    }
     app_handle
         .emit(
             "agent_status",
@@ -53,7 +65,7 @@ async fn start_scenario(
 
         // Route the message
         let route_start = Instant::now();
-        router.route_message(msg.clone()).await;
+        let _ = router.route_message(msg.clone()).await;
         metrics.record_message_routing(route_start.elapsed().as_millis() as f64);
 
         app_handle
@@ -64,7 +76,9 @@ async fn start_scenario(
             .unwrap();
 
         // 3. Release lease
-        territory_manager.release_lease(&agent_a_id, &resource);
+        let _ = territory_manager
+            .release_lease(&agent_a_id, &resource)
+            .await;
         app_handle
             .emit(
                 "agent_status",
@@ -76,8 +90,20 @@ async fn start_scenario(
     // --- Agent B's Turn ---
     // 1. Acquire lease
     let lease_start_b = Instant::now();
-    let acquired_b = territory_manager.acquire_lease(&agent_b_id, &resource);
-    metrics.record_lease_acquisition(lease_start_b.elapsed().as_millis() as f64);
+    let decision_b = territory_manager
+        .acquire_lease(LeaseRequest::new(
+            agent_b_id.clone(),
+            resource.clone(),
+            Priority::Coordinate,
+        ))
+        .await;
+    let acquired_b = matches!(
+        decision_b,
+        LeaseDecision::Granted(_) | LeaseDecision::Overridden { .. }
+    );
+    if acquired_b {
+        metrics.record_lease_acquisition(lease_start_b.elapsed().as_millis() as f64);
+    }
     app_handle
         .emit(
             "agent_status",
@@ -99,7 +125,7 @@ async fn start_scenario(
 
         // Route the message
         let route_start = Instant::now();
-        router.route_message(msg.clone()).await;
+        let _ = router.route_message(msg.clone()).await;
         metrics.record_message_routing(route_start.elapsed().as_millis() as f64);
 
         app_handle
@@ -110,7 +136,9 @@ async fn start_scenario(
             .unwrap();
 
         // 3. Release lease
-        territory_manager.release_lease(&agent_b_id, &resource);
+        let _ = territory_manager
+            .release_lease(&agent_b_id, &resource)
+            .await;
         app_handle
             .emit(
                 "agent_status",
@@ -166,7 +194,17 @@ async fn start_pty_scenario(
         )
         .unwrap();
 
-    let acquired = territory_manager.acquire_lease(&agent_a_id, &resource);
+    let decision = territory_manager
+        .acquire_lease(LeaseRequest::new(
+            agent_a_id.clone(),
+            resource.clone(),
+            Priority::Coordinate,
+        ))
+        .await;
+    let acquired = matches!(
+        decision,
+        LeaseDecision::Granted(_) | LeaseDecision::Overridden { .. }
+    );
     app_handle
         .emit(
             "agent_status",
@@ -192,7 +230,7 @@ async fn start_pty_scenario(
             recipient: agent_b_id.clone(),
         };
 
-        router.route_message(msg.clone()).await;
+        let _ = router.route_message(msg.clone()).await;
 
         app_handle
             .emit(
@@ -201,7 +239,9 @@ async fn start_pty_scenario(
             )
             .unwrap();
 
-        territory_manager.release_lease(&agent_a_id, &resource);
+        let _ = territory_manager
+            .release_lease(&agent_a_id, &resource)
+            .await;
         app_handle
             .emit(
                 "agent_status",
@@ -210,7 +250,17 @@ async fn start_pty_scenario(
             .unwrap();
     }
 
-    let acquired_b = territory_manager.acquire_lease(&agent_b_id, &resource);
+    let decision_b = territory_manager
+        .acquire_lease(LeaseRequest::new(
+            agent_b_id.clone(),
+            resource.clone(),
+            Priority::Coordinate,
+        ))
+        .await;
+    let acquired_b = matches!(
+        decision_b,
+        LeaseDecision::Granted(_) | LeaseDecision::Overridden { .. }
+    );
     app_handle
         .emit(
             "agent_status",
@@ -236,7 +286,7 @@ async fn start_pty_scenario(
             recipient: agent_a_id.clone(),
         };
 
-        router.route_message(msg.clone()).await;
+        let _ = router.route_message(msg.clone()).await;
 
         app_handle
             .emit(
@@ -245,7 +295,9 @@ async fn start_pty_scenario(
             )
             .unwrap();
 
-        territory_manager.release_lease(&agent_b_id, &resource);
+        let _ = territory_manager
+            .release_lease(&agent_b_id, &resource)
+            .await;
         app_handle
             .emit(
                 "agent_status",
@@ -275,10 +327,10 @@ async fn reset_metrics(metrics: tauri::State<'_, MetricsCollector>) -> Result<()
 }
 
 fn main() {
-    let router = UnifiedMessageRouter::new();
-    let territory_manager = TerritoryManager::new();
-    let agents: Arc<Mutex<HashMap<String, AgentProcess>>> = Arc::new(Mutex::new(HashMap::new()));
     let metrics_collector = MetricsCollector::new();
+    let router = UnifiedMessageRouter::with_metrics(metrics_collector.clone());
+    let territory_manager = TerritoryManager::new(metrics_collector.clone());
+    let agents: Arc<Mutex<HashMap<String, AgentProcess>>> = Arc::new(Mutex::new(HashMap::new()));
 
     tauri::Builder::default()
         .manage(router)

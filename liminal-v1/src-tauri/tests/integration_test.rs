@@ -1,137 +1,299 @@
-use liminal_v1::router::{Message, Priority, UnifiedMessageRouter};
-use liminal_v1::territory::TerritoryManager;
+use liminal_v1::metrics::MetricsCollector;
+use liminal_v1::router::{DispatcherConfig, Message, Priority, UnifiedMessageRouter};
+use liminal_v1::territory::{
+    LeaseDecision, LeaseRequest, TerritoryEvent, TerritoryManager, TerritoryPolicy,
+};
 use std::sync::Arc;
-use tokio;
+use std::time::Duration;
+use tokio::time;
 
 #[tokio::test]
-async fn test_scenario_message_routing() {
-    let router = Arc::new(UnifiedMessageRouter::new());
-
-    let msg = Message {
-        content: "Test message".to_string(),
-        priority: Priority::Coordinate,
-        sender: "Agent_A".to_string(),
-        recipient: "Agent_B".to_string(),
+async fn router_dispatches_by_priority() {
+    let metrics = MetricsCollector::new();
+    let config = DispatcherConfig {
+        idle_backoff: Duration::from_millis(5),
+        ..DispatcherConfig::default()
     };
+    let router = Arc::new(UnifiedMessageRouter::with_config(metrics, config));
+    let mut deliveries = router.subscribe();
 
-    router.route_message(msg.clone()).await;
-
-    let pending = router.get_pending_messages().await;
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].content, "Test message");
-}
-
-#[tokio::test]
-async fn test_scenario_territory_management() {
-    let territory_manager = Arc::new(TerritoryManager::new());
-    let agent_a_id = "Agent_A".to_string();
-    let agent_b_id = "Agent_B".to_string();
-    let resource = "shared_file.txt".to_string();
-
-    assert!(territory_manager.acquire_lease(&agent_a_id, &resource));
-
-    assert!(!territory_manager.acquire_lease(&agent_b_id, &resource));
-
-    territory_manager.release_lease(&agent_a_id, &resource);
-
-    assert!(territory_manager.acquire_lease(&agent_b_id, &resource));
-
-    territory_manager.release_lease(&agent_b_id, &resource);
-}
-
-#[tokio::test]
-async fn test_full_scenario_workflow() {
-    let router = Arc::new(UnifiedMessageRouter::new());
-    let territory_manager = Arc::new(TerritoryManager::new());
-
-    let agent_a_id = "Agent_A".to_string();
-    let agent_b_id = "Agent_B".to_string();
-    let resource = "shared_file.txt".to_string();
-
-    let acquired_a = territory_manager.acquire_lease(&agent_a_id, &resource);
-    assert!(acquired_a);
-
-    let msg_a = Message {
-        content: "Hello from Agent A! I have the lease.".to_string(),
-        priority: Priority::Coordinate,
-        sender: agent_a_id.clone(),
-        recipient: agent_b_id.clone(),
-    };
-
-    router.route_message(msg_a).await;
-
-    territory_manager.release_lease(&agent_a_id, &resource);
-
-    let acquired_b = territory_manager.acquire_lease(&agent_b_id, &resource);
-    assert!(acquired_b);
-
-    let msg_b = Message {
-        content: "Hello from Agent B! I have acquired the lease now.".to_string(),
-        priority: Priority::Coordinate,
-        sender: agent_b_id.clone(),
-        recipient: agent_a_id.clone(),
-    };
-
-    router.route_message(msg_b).await;
-
-    territory_manager.release_lease(&agent_b_id, &resource);
-
-    let pending = router.get_pending_messages().await;
-    assert_eq!(pending.len(), 2);
-}
-
-#[tokio::test]
-async fn test_message_priority_ordering() {
-    let router = Arc::new(UnifiedMessageRouter::new());
-
-    let critical_msg = Message {
-        content: "Critical message".to_string(),
-        priority: Priority::Critical,
-        sender: "Agent_A".to_string(),
-        recipient: "Agent_B".to_string(),
-    };
-
-    let coordinate_msg = Message {
-        content: "Coordinate message".to_string(),
-        priority: Priority::Coordinate,
-        sender: "Agent_A".to_string(),
-        recipient: "Agent_B".to_string(),
-    };
-
-    let info_msg = Message {
-        content: "Info message".to_string(),
+    let info = Message {
+        content: "info".to_string(),
         priority: Priority::Info,
-        sender: "Agent_A".to_string(),
-        recipient: "Agent_B".to_string(),
+        sender: "agent".to_string(),
+        recipient: "peer".to_string(),
+    };
+    let coordinate = Message {
+        content: "coordinate".to_string(),
+        priority: Priority::Coordinate,
+        sender: "agent".to_string(),
+        recipient: "peer".to_string(),
+    };
+    let critical = Message {
+        content: "critical".to_string(),
+        priority: Priority::Critical,
+        sender: "agent".to_string(),
+        recipient: "peer".to_string(),
     };
 
-    router.route_message(info_msg).await;
-    router.route_message(coordinate_msg).await;
-    router.route_message(critical_msg).await;
+    router.route_message(info).await.unwrap();
+    router.route_message(coordinate).await.unwrap();
+    router.route_message(critical).await.unwrap();
 
-    let pending = router.get_pending_messages().await;
-    assert_eq!(pending.len(), 3);
-    assert_eq!(pending[0].content, "Critical message");
-    assert_eq!(pending[1].content, "Coordinate message");
-    assert_eq!(pending[2].content, "Info message");
+    let first = time::timeout(Duration::from_millis(200), deliveries.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = time::timeout(Duration::from_millis(200), deliveries.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let third = time::timeout(Duration::from_millis(200), deliveries.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(first.message.content, "critical");
+    assert_eq!(second.message.content, "coordinate");
+    assert_eq!(third.message.content, "info");
 }
 
 #[tokio::test]
-async fn test_concurrent_lease_attempts() {
-    let territory_manager = Arc::new(TerritoryManager::new());
+async fn router_applies_aging_boosts() {
+    let metrics = MetricsCollector::new();
+    let config = DispatcherConfig {
+        aging_threshold: Duration::from_millis(60),
+        idle_backoff: Duration::from_millis(5),
+        token_capacity: 5.0,
+        token_refill_rate: 10.0,
+        initial_tokens: 0.0,
+        max_aging_boosts: 1,
+        ..DispatcherConfig::default()
+    };
+    let router = Arc::new(UnifiedMessageRouter::with_config(metrics, config));
+    let mut deliveries = router.subscribe();
+
+    let info = Message {
+        content: "needs boost".to_string(),
+        priority: Priority::Info,
+        sender: "slow".to_string(),
+        recipient: "peer".to_string(),
+    };
+
+    router.route_message(info).await.unwrap();
+
+    let delivery = time::timeout(Duration::from_millis(1200), deliveries.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(delivery.message.content, "needs boost");
+    assert_eq!(delivery.effective_priority, Priority::Coordinate);
+    assert!(delivery.wait_time >= Duration::from_millis(60));
+    assert!(delivery.aging_boosts >= 1);
+}
+
+#[tokio::test]
+async fn router_enforces_token_quota() {
+    let metrics = MetricsCollector::new();
+    let config = DispatcherConfig {
+        idle_backoff: Duration::from_millis(5),
+        token_capacity: 2.0,
+        token_refill_rate: 4.0,
+        initial_tokens: 2.0,
+        ..DispatcherConfig::default()
+    };
+    let router = Arc::new(UnifiedMessageRouter::with_config(metrics, config));
+    let mut deliveries = router.subscribe();
+
+    for label in ["first", "second"] {
+        let message = Message {
+            content: label.to_string(),
+            priority: Priority::Info,
+            sender: "quota".to_string(),
+            recipient: "peer".to_string(),
+        };
+        router.route_message(message).await.unwrap();
+    }
+
+    let one = time::timeout(Duration::from_millis(200), deliveries.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let two = time::timeout(Duration::from_millis(200), deliveries.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(one.message.content, "first");
+    assert_eq!(two.message.content, "second");
+
+    let throttled = Message {
+        content: "third".to_string(),
+        priority: Priority::Info,
+        sender: "quota".to_string(),
+        recipient: "peer".to_string(),
+    };
+    router.route_message(throttled).await.unwrap();
+
+    let immediate = time::timeout(Duration::from_millis(50), deliveries.recv()).await;
+    assert!(immediate.is_err());
+
+    let eventual = time::timeout(Duration::from_millis(400), deliveries.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(eventual.message.content, "third");
+    assert!(eventual.retry_count > 0);
+}
+
+fn build_manager_with_policy(policy: TerritoryPolicy) -> TerritoryManager {
+    TerritoryManager::with_policy(MetricsCollector::new(), policy)
+}
+
+#[tokio::test]
+async fn territory_promotes_waiting_request_on_release() {
+    let mut policy = TerritoryPolicy::default();
+    policy.auto_extend_threshold = Duration::from_millis(1);
+    let manager = build_manager_with_policy(policy);
+    let resource = "shared_file.txt".to_string();
+
+    let first = manager
+        .acquire_lease(LeaseRequest::new(
+            "Agent_A".to_string(),
+            resource.clone(),
+            Priority::Coordinate,
+        ))
+        .await;
+    assert!(matches!(first, LeaseDecision::Granted(_)));
+
+    let second = manager
+        .acquire_lease(LeaseRequest::new(
+            "Agent_B".to_string(),
+            resource.clone(),
+            Priority::Coordinate,
+        ))
+        .await;
+    assert!(matches!(second, LeaseDecision::Queued(_)));
+
+    let released = manager
+        .release_lease(&"Agent_A".to_string(), &resource)
+        .await;
+    assert!(released.is_some());
+
+    let active = manager.current_lease(&resource).await;
+    assert_eq!(active.unwrap().holder_id, "Agent_B".to_string());
+}
+
+#[tokio::test]
+async fn territory_defers_when_holder_near_expiry() {
+    let mut policy = TerritoryPolicy::default();
+    policy.default_lease_duration = Duration::from_millis(100);
+    policy.max_lease_duration = Duration::from_millis(100);
+    policy.auto_extend_threshold = Duration::from_secs(5);
+    let manager = build_manager_with_policy(policy);
+    let resource = "doc.md".to_string();
+
+    let first = manager
+        .acquire_lease(LeaseRequest::new(
+            "Holder".to_string(),
+            resource.clone(),
+            Priority::Coordinate,
+        ))
+        .await;
+    assert!(matches!(first, LeaseDecision::Granted(_)));
+
+    let second = manager
+        .acquire_lease(LeaseRequest::new(
+            "Contender".to_string(),
+            resource.clone(),
+            Priority::Coordinate,
+        ))
+        .await;
+    assert!(matches!(second, LeaseDecision::Deferred { .. }));
+}
+
+#[tokio::test]
+async fn territory_overrides_on_priority_delta() {
+    let mut policy = TerritoryPolicy::default();
+    policy.override_priority_delta = 1;
+    policy.auto_extend_threshold = Duration::from_millis(1);
+    let manager = build_manager_with_policy(policy);
+    let resource = "plan.json".to_string();
+
+    let base = manager
+        .acquire_lease(LeaseRequest::new(
+            "Agent_Low".to_string(),
+            resource.clone(),
+            Priority::Coordinate,
+        ))
+        .await;
+    assert!(matches!(base, LeaseDecision::Granted(_)));
+
+    let override_decision = manager
+        .acquire_lease(LeaseRequest::new(
+            "Agent_High".to_string(),
+            resource.clone(),
+            Priority::Critical,
+        ))
+        .await;
+    assert!(matches!(
+        override_decision,
+        LeaseDecision::Overridden { .. }
+    ));
+
+    let holder = manager.current_lease(&resource).await.unwrap();
+    assert_eq!(holder.holder_id, "Agent_High");
+    assert_eq!(holder.priority, Priority::Critical);
+}
+
+#[tokio::test]
+async fn territory_escalates_on_queue_pressure() {
+    let mut policy = TerritoryPolicy::default();
+    policy.auto_extend_threshold = Duration::from_millis(1);
+    policy.escalation_queue_threshold = 2;
+    let manager = build_manager_with_policy(policy);
     let resource = "shared_resource.txt".to_string();
+    let mut events = manager.subscribe();
 
-    let tm1 = Arc::clone(&territory_manager);
-    let tm2 = Arc::clone(&territory_manager);
-    let r1 = resource.clone();
-    let r2 = resource.clone();
+    let grant = manager
+        .acquire_lease(LeaseRequest::new(
+            "Primary".to_string(),
+            resource.clone(),
+            Priority::Coordinate,
+        ))
+        .await;
+    assert!(matches!(grant, LeaseDecision::Granted(_)));
 
-    let handle1 = tokio::spawn(async move { tm1.acquire_lease(&"Agent_1".to_string(), &r1) });
+    let queued_one = manager
+        .acquire_lease(LeaseRequest::new(
+            "Waiter_1".to_string(),
+            resource.clone(),
+            Priority::Coordinate,
+        ))
+        .await;
+    assert!(matches!(queued_one, LeaseDecision::Queued(_)));
 
-    let handle2 = tokio::spawn(async move { tm2.acquire_lease(&"Agent_2".to_string(), &r2) });
+    let queued_two = manager
+        .acquire_lease(LeaseRequest::new(
+            "Waiter_2".to_string(),
+            resource.clone(),
+            Priority::Coordinate,
+        ))
+        .await;
+    assert!(matches!(queued_two, LeaseDecision::Queued(_)));
 
-    let result1 = handle1.await.unwrap();
-    let result2 = handle2.await.unwrap();
+    let mut escalated = false;
+    for _ in 0..5 {
+        let event = time::timeout(Duration::from_millis(200), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(event, TerritoryEvent::Escalated { .. }) {
+            escalated = true;
+            break;
+        }
+    }
 
-    assert!(result1 ^ result2);
+    assert!(escalated);
 }

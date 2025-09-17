@@ -1,3 +1,4 @@
+use crate::router::Priority;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -11,9 +12,17 @@ pub struct PerformanceMetrics {
     pub total_messages_routed: u64,
     pub total_leases_acquired: u64,
     pub memory_usage_mb: f64,
+    pub last_dispatched_priority: Option<String>,
+    pub last_queue_depths: Vec<usize>,
+    pub rate_limited_messages: u64,
+    pub active_leases: u64,
+    pub pending_lease_requests: u64,
+    pub deferred_lease_requests: u64,
+    pub lease_overrides: u64,
+    pub lease_escalations: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MetricsCollector {
     metrics: Arc<RwLock<PerformanceMetrics>>,
     timers: Arc<RwLock<HashMap<String, Instant>>>,
@@ -29,6 +38,14 @@ impl MetricsCollector {
                 total_messages_routed: 0,
                 total_leases_acquired: 0,
                 memory_usage_mb: 0.0,
+                last_dispatched_priority: None,
+                last_queue_depths: Vec::new(),
+                rate_limited_messages: 0,
+                active_leases: 0,
+                pending_lease_requests: 0,
+                deferred_lease_requests: 0,
+                lease_overrides: 0,
+                lease_escalations: 0,
             })),
             timers: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -51,6 +68,53 @@ impl MetricsCollector {
             * (metrics.total_messages_routed - 1) as f64
             + duration_ms)
             / metrics.total_messages_routed as f64;
+    }
+
+    pub fn record_router_delivery(
+        &self,
+        priority: Priority,
+        wait_duration: Duration,
+        queue_depths: &[usize],
+    ) {
+        self.record_message_routing(wait_duration.as_secs_f64() * 1000.0);
+        let mut metrics = self.metrics.write().unwrap();
+        metrics.last_dispatched_priority = Some(priority.as_str().to_string());
+        metrics.last_queue_depths = queue_depths.to_vec();
+    }
+
+    pub fn increment_rate_limited(&self) {
+        let mut metrics = self.metrics.write().unwrap();
+        metrics.rate_limited_messages += 1;
+    }
+
+    pub fn record_lease_grant(&self, queue_depth: usize) {
+        let mut metrics = self.metrics.write().unwrap();
+        metrics.total_leases_acquired += 1;
+        metrics.active_leases += 1;
+        metrics.pending_lease_requests = queue_depth as u64;
+    }
+
+    pub fn record_lease_release(&self, queue_depth: usize) {
+        let mut metrics = self.metrics.write().unwrap();
+        metrics.active_leases = metrics.active_leases.saturating_sub(1);
+        metrics.pending_lease_requests = queue_depth as u64;
+    }
+
+    pub fn record_lease_deferral(&self, queue_depth: usize) {
+        let mut metrics = self.metrics.write().unwrap();
+        metrics.deferred_lease_requests += 1;
+        metrics.pending_lease_requests = queue_depth as u64;
+    }
+
+    pub fn record_lease_override(&self, queue_depth: usize) {
+        let mut metrics = self.metrics.write().unwrap();
+        metrics.lease_overrides += 1;
+        metrics.pending_lease_requests = queue_depth as u64;
+    }
+
+    pub fn record_lease_escalation(&self) {
+        let mut metrics = self.metrics.write().unwrap();
+        metrics.lease_escalations += 1;
     }
 
     pub fn record_agent_spawn(&self, duration_ms: f64) {
@@ -106,6 +170,14 @@ impl MetricsCollector {
             total_messages_routed: 0,
             total_leases_acquired: 0,
             memory_usage_mb: 0.0,
+            last_dispatched_priority: None,
+            last_queue_depths: Vec::new(),
+            rate_limited_messages: 0,
+            active_leases: 0,
+            pending_lease_requests: 0,
+            deferred_lease_requests: 0,
+            lease_overrides: 0,
+            lease_escalations: 0,
         };
     }
 }
