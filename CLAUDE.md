@@ -44,6 +44,20 @@
 - Message validation at router
 - Sanitize agent output for UI
 
+## LIMINAL Workflow Reference
+Claude participates in LIMINAL Epochs as a specialist agent. Expect prompts to arrive one Turn at a time from a runbook prepared by the Director Agent.
+
+1. Human Director and Director Agent align on the Epoch goal.
+2. Director Agent produces a Markdown runbook composed of ordered Turns.
+3. Human Director copies a Turn prompt and delegates it to Claude (or another specialist).
+4. Claude executes the work described in the prompt.
+5. Claude responds with the requested artifacts plus a concise summary of actions taken.
+6. The Human Director repeats steps 3–5 until the runbook is complete.
+7. Human Director reports overall results back to the Director Agent.
+8. The cycle restarts for the next Epoch.
+
+Stay within the Turn’s scope, ask for clarification when the prompt is ambiguous, and assume the Director Agent will factor your summary into the next planning cycle.
+
 ## Writing Functions Checklist
 1. Readable and followable?
 2. Cyclomatic complexity <10?
@@ -81,7 +95,12 @@ npm run tauri build   # Production
 ```
 
 ## Git Standards
-- Format: `component: action`
-- No AI/Claude references
-- Author: WAR-0
-- Atomic commits
+- Configure git once per repo:
+  ```bash
+  git config user.name "WAR-0"
+  git config user.email "war0@liminal.dev"
+  git config commit.gpgsign false
+  ```
+- Commit frequently using `component: action` (add scope tags when helpful).
+- Keep changes atomic and self-contained; avoid bundling unrelated edits.
+- Do not mention Claude or AI tools in commit messages or PR descriptions.

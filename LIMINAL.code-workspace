@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../uncan"
+		},
+		{
+			"path": "../FORGE"
+		}
+	],
+	"settings": {}
+}

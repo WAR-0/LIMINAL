@@ -3,6 +3,7 @@
   "identifier": "default",
   "description": "Default permissions for the LIMINAL V1 application",
   "platforms": ["linux", "macOS", "windows"],
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "core:event:allow-listen",

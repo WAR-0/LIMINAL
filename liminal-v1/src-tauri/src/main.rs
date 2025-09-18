@@ -1,19 +1,79 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent;
+mod config;
+mod health;
 mod metrics;
 mod router;
 mod territory;
 
 use agent::{AgentEvent, AgentEventSender, AgentProcess};
-use metrics::{MetricsCollector, PerformanceMetrics};
+use config::AppConfig;
+use health::HealthMonitor;
+use metrics::{MetricsCollector, MetricsSnapshot, PerformanceMetrics};
 use router::{Message, Priority, UnifiedMessageRouter};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
+use tauri::async_runtime::JoinHandle;
 use tauri::Emitter;
 use territory::{LeaseDecision, LeaseRequest, TerritoryManager};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
+
+type SharedHealthMonitor = Arc<AsyncMutex<HealthMonitor>>;
+
+struct MetricsStreamState {
+    handle: AsyncMutex<Option<JoinHandle<()>>>,
+}
+
+impl MetricsStreamState {
+    fn new() -> Self {
+        Self {
+            handle: AsyncMutex::new(None),
+        }
+    }
+
+    async fn ensure_running(
+        &self,
+        metrics: MetricsCollector,
+        app_handle: tauri::AppHandle,
+        health_monitor: SharedHealthMonitor,
+    ) {
+        let mut guard = self.handle.lock().await;
+        if guard.is_some() {
+            return;
+        }
+        let metrics_clone = metrics.clone();
+        let emitter = app_handle.clone();
+        let health_monitor_clone = health_monitor.clone();
+        let handle = tauri::async_runtime::spawn(async move {
+            loop {
+                let snapshot = metrics_clone.get_snapshot();
+                let alerts = {
+                    let mut monitor = health_monitor_clone.lock().await;
+                    monitor.evaluate(&snapshot)
+                };
+                for alert in alerts {
+                    println!("[HealthAlert {}]: {}", alert.severity, alert.message);
+                    if let Err(err) = emitter.emit("health_alert", alert) {
+                        println!("[HealthAlert emit error]: {}", err);
+                    }
+                }
+                if let Err(err) = emitter.emit("metrics_snapshot", snapshot.clone()) {
+                    println!("[MetricsStream emit error]: {}", err);
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+        *guard = Some(handle);
+    }
+}
+
+impl Default for MetricsStreamState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[tauri::command]
 async fn start_scenario(
@@ -332,20 +392,121 @@ async fn get_performance_metrics(
 }
 
 #[tauri::command]
+async fn get_metrics_snapshot(
+    metrics: tauri::State<'_, MetricsCollector>,
+) -> Result<MetricsSnapshot, String> {
+    Ok(metrics.get_snapshot())
+}
+
+#[tauri::command]
+async fn start_metrics_stream(
+    metrics: tauri::State<'_, MetricsCollector>,
+    stream_state: tauri::State<'_, MetricsStreamState>,
+    health_monitor: tauri::State<'_, SharedHealthMonitor>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    stream_state
+        .ensure_running(
+            metrics.inner().clone(),
+            app_handle,
+            health_monitor.inner().clone(),
+        )
+        .await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn simulate_router_load(
+    router: tauri::State<'_, UnifiedMessageRouter>,
+) -> Result<(), String> {
+    let priorities = [
+        Priority::Info,
+        Priority::Coordinate,
+        Priority::Blocking,
+        Priority::Critical,
+        Priority::DirectorOverride,
+    ];
+    for index in 0..40u32 {
+        let priority = priorities[(index as usize) % priorities.len()];
+        let message = Message {
+            content: format!("Synthetic message {}", index),
+            priority,
+            sender: format!("synthetic_sender_{}", index % 5),
+            recipient: format!("synthetic_recipient_{}", index % 3),
+        };
+        router
+            .route_message(message)
+            .await
+            .map_err(|err| format!("failed to route synthetic message: {:?}", err))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn simulate_lease_contention(
+    territory_manager: tauri::State<'_, TerritoryManager>,
+) -> Result<(), String> {
+    let manager = territory_manager.inner().clone();
+    let timestamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let resource_id = format!("synthetic_resource_{}", timestamp);
+    let mut workers = Vec::new();
+    for index in 0..6u32 {
+        let manager_clone = manager.clone();
+        let resource = resource_id.clone();
+        workers.push(tauri::async_runtime::spawn(async move {
+            let request = LeaseRequest::new(
+                format!("SyntheticAgent_{}", index),
+                resource.clone(),
+                if index % 2 == 0 {
+                    Priority::Coordinate
+                } else {
+                    Priority::Blocking
+                },
+            );
+            let _ = manager_clone.acquire_lease(request).await;
+        }));
+    }
+    for worker in workers {
+        let _ = worker.await;
+    }
+    for index in 0..6u32 {
+        let manager_clone = manager.clone();
+        let resource = resource_id.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3 + index as u64)).await;
+            let agent_id = format!("SyntheticAgent_{}", index);
+            let _ = manager_clone.release_lease(&agent_id, &resource).await;
+        });
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn reset_metrics(metrics: tauri::State<'_, MetricsCollector>) -> Result<(), String> {
     metrics.reset_metrics();
     Ok(())
 }
 
 fn main() {
+    let app_config = AppConfig::load();
     let metrics_collector = MetricsCollector::new();
-    let router = UnifiedMessageRouter::with_metrics(metrics_collector.clone());
-    let territory_manager = TerritoryManager::new(metrics_collector.clone());
+    let router =
+        UnifiedMessageRouter::with_settings(metrics_collector.clone(), app_config.router.as_ref());
+    let territory_manager =
+        TerritoryManager::new(metrics_collector.clone(), app_config.territory.as_ref());
     let agents: Arc<Mutex<HashMap<String, AgentProcess>>> = Arc::new(Mutex::new(HashMap::new()));
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let event_sender = AgentEventSender::new(event_tx);
     let mut event_rx = Some(event_rx);
     let metrics_for_setup = metrics_collector.clone();
+    let health_monitor: SharedHealthMonitor = Arc::new(AsyncMutex::new(HealthMonitor::new(
+        app_config.health_monitoring_kpis.as_ref(),
+    )));
+    let metrics_stream_state = MetricsStreamState::new();
+    let app_config_state = app_config.clone();
 
     tauri::Builder::default()
         .manage(router)
@@ -353,17 +514,20 @@ fn main() {
         .manage(agents)
         .manage(metrics_collector)
         .manage(event_sender)
+        .manage(metrics_stream_state)
+        .manage(health_monitor.clone())
+        .manage(app_config_state)
         .setup(move |_app| {
             let mut rx = event_rx.take().expect("agent event receiver missing");
             let metrics = metrics_for_setup.clone();
             tauri::async_runtime::spawn(async move {
                 while let Some(event) = rx.recv().await {
+                    metrics.record_agent_event(&event.agent_id, event.event_name.as_deref());
                     let name = event
                         .event_name
                         .clone()
                         .unwrap_or_else(|| "unknown".to_string());
-                    metrics.record_agent_event(&name);
-                    println!("[AgentEvent {}]: {}", event.agent_id, event.raw);
+                    println!("[AgentEvent {} - {}]: {}", event.agent_id, name, event.raw);
                 }
             });
             Ok(())
@@ -373,6 +537,10 @@ fn main() {
             start_pty_scenario,
             get_agent_status,
             get_performance_metrics,
+            get_metrics_snapshot,
+            start_metrics_stream,
+            simulate_router_load,
+            simulate_lease_contention,
             reset_metrics
         ])
         .run(tauri::generate_context!())

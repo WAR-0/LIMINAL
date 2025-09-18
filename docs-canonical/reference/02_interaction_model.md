@@ -182,6 +182,12 @@ impl PriorityRouter {
 }
 ```
 
+### Live Metrics & Health Alerts
+
+- `MetricsCollector` snapshots expose queue depths by priority, per-sender token bucket levels, lease inventory summaries, PTY structured events, and process memory. The desktop dashboard consumes these snapshots via `get_metrics_snapshot` or the shared `start_metrics_stream` task.
+- `start_metrics_stream` emits `metrics_snapshot` every second and evaluates health thresholds from `config/liminal.config.yaml#health_monitoring_kpis`, producing `health_alert` events that encode severity, message, and contextual metrics.
+- Synthetic helpers (`simulate_router_load`, `simulate_lease_contention`) let operators drive deterministic load to validate rate limiting, queue depth warnings, and lease escalations in concert.
+
 ### State Machine for Message Lifecycle
 
 ```mermaid

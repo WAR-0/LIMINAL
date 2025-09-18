@@ -1,9 +1,10 @@
+use crate::config::{
+    parse_duration as parse_duration_str, TerritoryConfig as TerritoryConfigOverrides,
+};
 use crate::metrics::MetricsCollector;
 use crate::router::Priority;
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,6 +25,10 @@ static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 impl LeaseId {
     fn new() -> Self {
         Self(LEASE_ID_COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn as_u64(self) -> u64 {
+        self.0
     }
 }
 
@@ -146,6 +151,36 @@ impl TerritoryState {
                 entry.state = NegotiationState::Escalating;
             }
         }
+    }
+}
+
+#[derive(Default)]
+struct LeaseInventorySnapshot {
+    active: usize,
+    pending: HashMap<String, usize>,
+    outstanding: Vec<u64>,
+}
+
+impl LeaseInventorySnapshot {
+    fn from_state(state: &TerritoryState) -> Self {
+        let mut pending = HashMap::new();
+        for (resource, entries) in state.queues.iter() {
+            pending.insert(resource.clone(), entries.len());
+        }
+        let outstanding = state
+            .leases
+            .values()
+            .map(|lease| lease.id.as_u64())
+            .collect();
+        Self {
+            active: state.leases.len(),
+            pending,
+            outstanding,
+        }
+    }
+
+    fn into_parts(self) -> (usize, HashMap<String, usize>, Vec<u64>) {
+        (self.active, self.pending, self.outstanding)
     }
 }
 
@@ -365,71 +400,65 @@ impl TerritoryPolicy {
         }
     }
 
-    fn load_from_config() -> Self {
-        if let Some(path) = resolve_config_path() {
-            if let Ok(contents) = fs::read_to_string(path) {
-                return Self::from_config_str(&contents);
-            }
-        }
-        Self::baseline()
-    }
-
-    fn from_config_str(contents: &str) -> Self {
+    fn from_config(config: Option<&TerritoryConfigOverrides>) -> Self {
         let mut policy = Self::baseline();
-        let mut in_territory = false;
-        let mut current_block: Option<String> = None;
-
-        for raw_line in contents.lines() {
-            let cleaned = raw_line.split('#').next().unwrap_or("").trim_end();
-            if cleaned.trim().is_empty() {
-                continue;
+        if let Some(overrides) = config {
+            if let Some(duration) = overrides
+                .default_lease_duration
+                .as_deref()
+                .and_then(parse_duration_str)
+            {
+                policy.default_lease_duration = duration;
             }
-
-            let indent = raw_line.chars().take_while(|c| c.is_whitespace()).count();
-            let trimmed = cleaned.trim();
-
-            if trimmed.ends_with(':') {
-                if trimmed
-                    .split_once(':')
-                    .map(|(_, rest)| rest.trim().is_empty())
-                    .unwrap_or(false)
-                {
-                    let key = trimmed.trim_end_matches(':').trim();
-                    match indent {
-                        0 => {
-                            in_territory = key == "territory_config";
-                            current_block = None;
-                        }
-                        2 if in_territory => {
-                            current_block = Some(key.to_string());
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
+            if let Some(duration) = overrides
+                .max_lease_duration
+                .as_deref()
+                .and_then(parse_duration_str)
+            {
+                policy.max_lease_duration = duration;
             }
-
-            if !in_territory {
-                continue;
+            if let Some(duration) = overrides
+                .auto_extend_threshold
+                .as_deref()
+                .and_then(parse_duration_str)
+            {
+                policy.auto_extend_threshold = duration;
             }
-
-            if let Some((key_part, value_part)) = trimmed.split_once(':') {
-                if indent == 2 {
-                    current_block = None;
-                }
-                let key = key_part.trim();
-                let value = value_part.trim();
-                match current_block.as_deref() {
-                    None => apply_direct_policy(&mut policy, key, value),
-                    Some("negotiation") => apply_negotiation_policy(&mut policy, key, value),
-                    Some("escalation") => apply_escalation_policy(&mut policy, key, value),
-                    Some("fairness") => apply_fairness_policy(&mut policy, key, value),
-                    Some("spatial_hash") => apply_spatial_policy(&mut policy, key, value),
-                    _ => {}
-                }
+            if let Some(duration) = overrides
+                .negotiation_timeout
+                .as_deref()
+                .and_then(parse_duration_str)
+            {
+                policy.negotiation_timeout = duration;
+            }
+            if let Some(rounds) = overrides.negotiation_max_rounds {
+                policy.negotiation_max_rounds = rounds;
+            }
+            if let Some(threshold) = overrides.escalation_queue_threshold {
+                policy.escalation_queue_threshold = threshold;
+            }
+            if let Some(duration) = overrides
+                .escalation_deadlock_timeout
+                .as_deref()
+                .and_then(parse_duration_str)
+            {
+                policy.escalation_deadlock_timeout = duration;
+            }
+            if let Some(duration) = overrides
+                .fairness_starvation_threshold
+                .as_deref()
+                .and_then(parse_duration_str)
+            {
+                policy.fairness_starvation_threshold = duration;
+            }
+            if let Some(duration) = overrides
+                .fairness_priority_boost_after
+                .as_deref()
+                .and_then(parse_duration_str)
+            {
+                policy.fairness_priority_boost_after = duration;
             }
         }
-
         policy
     }
 }
@@ -438,143 +467,6 @@ impl Default for TerritoryPolicy {
     fn default() -> Self {
         Self::baseline()
     }
-}
-
-fn apply_direct_policy(policy: &mut TerritoryPolicy, key: &str, value: &str) {
-    match key {
-        "default_lease_duration" => {
-            if let Some(duration) = parse_duration_literal(value) {
-                policy.default_lease_duration = duration;
-            }
-        }
-        "max_lease_duration" => {
-            if let Some(duration) = parse_duration_literal(value) {
-                policy.max_lease_duration = duration;
-            }
-        }
-        "auto_extend_threshold" => {
-            if let Some(duration) = parse_duration_literal(value) {
-                policy.auto_extend_threshold = duration;
-            }
-        }
-        "override_priority_delta" => {
-            if let Some(delta) = parse_u8_literal(value) {
-                policy.override_priority_delta = delta;
-            }
-        }
-        _ => {}
-    }
-}
-
-fn apply_negotiation_policy(policy: &mut TerritoryPolicy, key: &str, value: &str) {
-    match key {
-        "timeout" => {
-            if let Some(duration) = parse_duration_literal(value) {
-                policy.negotiation_timeout = duration;
-            }
-        }
-        "max_rounds" => {
-            if let Some(rounds) = parse_u32_literal(value) {
-                policy.negotiation_max_rounds = rounds;
-            }
-        }
-        _ => {}
-    }
-}
-
-fn apply_escalation_policy(policy: &mut TerritoryPolicy, key: &str, value: &str) {
-    match key {
-        "queue_threshold" => {
-            if let Some(threshold) = parse_u32_literal(value) {
-                policy.escalation_queue_threshold = threshold as usize;
-            }
-        }
-        "deadlock_timeout" => {
-            if let Some(duration) = parse_duration_literal(value) {
-                policy.escalation_deadlock_timeout = duration;
-            }
-        }
-        _ => {}
-    }
-}
-
-fn apply_fairness_policy(policy: &mut TerritoryPolicy, key: &str, value: &str) {
-    match key {
-        "starvation_threshold" => {
-            if let Some(duration) = parse_duration_literal(value) {
-                policy.fairness_starvation_threshold = duration;
-            }
-        }
-        "priority_boost_after" => {
-            if let Some(duration) = parse_duration_literal(value) {
-                policy.fairness_priority_boost_after = duration;
-            }
-        }
-        _ => {}
-    }
-}
-
-fn apply_spatial_policy(policy: &mut TerritoryPolicy, key: &str, value: &str) {
-    if key == "cell_size" {
-        if let Some(size) = parse_f64_literal(value) {
-            policy.spatial_cell_size = size;
-        }
-    }
-}
-
-fn parse_duration_literal(value: &str) -> Option<Duration> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let (number_part, unit) = if trimmed.ends_with("ms") {
-        (&trimmed[..trimmed.len() - 2], "ms")
-    } else if trimmed.ends_with('s') {
-        (&trimmed[..trimmed.len() - 1], "s")
-    } else if trimmed.ends_with('m') {
-        (&trimmed[..trimmed.len() - 1], "m")
-    } else if trimmed.ends_with('h') {
-        (&trimmed[..trimmed.len() - 1], "h")
-    } else {
-        (trimmed, "s")
-    };
-
-    let number = number_part.trim().parse::<f64>().ok()?;
-    let seconds = match unit {
-        "ms" => number / 1000.0,
-        "s" => number,
-        "m" => number * 60.0,
-        "h" => number * 3600.0,
-        _ => number,
-    };
-
-    Some(Duration::from_secs_f64(seconds))
-}
-
-fn parse_u32_literal(value: &str) -> Option<u32> {
-    value.trim().parse::<u32>().ok()
-}
-
-fn parse_u8_literal(value: &str) -> Option<u8> {
-    value.trim().parse::<u8>().ok()
-}
-
-fn parse_f64_literal(value: &str) -> Option<f64> {
-    value.trim().parse::<f64>().ok()
-}
-
-fn resolve_config_path() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    let direct = cwd.join("../config/liminal.config.yaml");
-    if direct.exists() {
-        return Some(direct);
-    }
-    let workspace = cwd.join("config/liminal.config.yaml");
-    if workspace.exists() {
-        return Some(workspace);
-    }
-    None
 }
 
 #[derive(Clone, Debug)]
@@ -659,6 +551,46 @@ impl CellIndex {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_config() -> TerritoryConfigOverrides {
+        TerritoryConfigOverrides {
+            default_lease_duration: Some("120s".to_string()),
+            max_lease_duration: Some("2h".to_string()),
+            auto_extend_threshold: Some("45s".to_string()),
+            negotiation_timeout: Some("15s".to_string()),
+            negotiation_max_rounds: Some(5),
+            escalation_queue_threshold: Some(4),
+            escalation_deadlock_timeout: Some("180s".to_string()),
+            fairness_starvation_threshold: Some("420s".to_string()),
+            fairness_priority_boost_after: Some("120s".to_string()),
+        }
+    }
+
+    #[test]
+    fn territory_policy_applies_config_overrides() {
+        let config = sample_config();
+        let policy = TerritoryPolicy::from_config(Some(&config));
+        assert_eq!(policy.default_lease_duration, Duration::from_secs(120));
+        assert_eq!(policy.max_lease_duration, Duration::from_secs(2 * 3600));
+        assert_eq!(policy.auto_extend_threshold, Duration::from_secs(45));
+        assert_eq!(policy.negotiation_timeout, Duration::from_secs(15));
+        assert_eq!(policy.negotiation_max_rounds, 5);
+        assert_eq!(policy.escalation_queue_threshold, 4);
+        assert_eq!(policy.escalation_deadlock_timeout, Duration::from_secs(180));
+        assert_eq!(
+            policy.fairness_starvation_threshold,
+            Duration::from_secs(420)
+        );
+        assert_eq!(
+            policy.fairness_priority_boost_after,
+            Duration::from_secs(120)
+        );
+    }
+}
+
 impl PartialEq for CellIndex {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0 && self.1 == other.1
@@ -673,8 +605,8 @@ impl Hash for CellIndex {
 }
 
 impl TerritoryManager {
-    pub fn new(metrics: MetricsCollector) -> Self {
-        let policy = TerritoryPolicy::load_from_config();
+    pub fn new(metrics: MetricsCollector, config: Option<&TerritoryConfigOverrides>) -> Self {
+        let policy = TerritoryPolicy::from_config(config);
         Self::with_policy(metrics, policy)
     }
 
@@ -734,9 +666,12 @@ impl TerritoryManager {
                         updated.cell = new_cell;
                     }
                 }
-                let queue_depth = guard.total_queue_depth();
+                let inventory = LeaseInventorySnapshot::from_state(&guard);
+                let (active, pending, outstanding) = inventory.into_parts();
                 drop(guard);
-                self.metrics.record_lease_override(queue_depth);
+                self.metrics.record_lease_override();
+                self.metrics
+                    .update_lease_inventory(active, pending, outstanding);
                 self.emit_event(TerritoryEvent::Overridden {
                     previous: previous_snapshot.clone(),
                     lease: snapshot.clone(),
@@ -750,7 +685,7 @@ impl TerritoryManager {
                 .expires_at
                 .checked_duration_since(now)
                 .unwrap_or_default();
-            let (handle, total_depth, decision_state) =
+            let (handle, _total_depth, decision_state) =
                 if time_left <= self.policy.auto_extend_threshold {
                     active.defer_count += 1;
                     let (handle, total) = guard.enqueue(
@@ -793,17 +728,17 @@ impl TerritoryManager {
                     },
                 });
             }
+            let inventory = LeaseInventorySnapshot::from_state(&guard);
+            let (active, pending, outstanding) = inventory.into_parts();
             drop(guard);
-            let queue_depth = total_depth;
-            match &decision_state {
-                LeaseDecision::Deferred { .. } => {
-                    self.metrics.record_lease_deferral(queue_depth);
-                }
-                LeaseDecision::Queued(_) => {
-                    self.metrics.record_lease_deferral(queue_depth);
-                }
-                _ => {}
+            if matches!(
+                decision_state,
+                LeaseDecision::Deferred { .. } | LeaseDecision::Queued(_)
+            ) {
+                self.metrics.record_lease_deferral();
             }
+            self.metrics
+                .update_lease_inventory(active, pending, outstanding);
             match decision_state.clone() {
                 LeaseDecision::Deferred {
                     handle,
@@ -825,9 +760,12 @@ impl TerritoryManager {
         lease.cell = guard.spatial.insert(lease.id, lease.coordinates);
         let snapshot = lease.snapshot();
         guard.leases.insert(request.resource_id.clone(), lease);
-        let queue_depth = guard.total_queue_depth();
+        let inventory = LeaseInventorySnapshot::from_state(&guard);
+        let (active, pending, outstanding) = inventory.into_parts();
         drop(guard);
-        self.metrics.record_lease_grant(queue_depth);
+        self.metrics.record_lease_grant();
+        self.metrics
+            .update_lease_inventory(active, pending, outstanding);
         self.emit_event(TerritoryEvent::Granted(snapshot.clone()));
         LeaseDecision::Granted(snapshot)
     }
@@ -847,7 +785,6 @@ impl TerritoryManager {
         guard.spatial.remove(lease.id, lease.cell);
         let snapshot = lease.snapshot();
         let next_entry = guard.take_next(&self.policy, resource, now);
-        let queue_depth = guard.total_queue_depth();
         let mut granted_snapshot: Option<LeaseSnapshot> = None;
         if let Some(entry) = next_entry {
             let request = LeaseRequest {
@@ -863,12 +800,14 @@ impl TerritoryManager {
             granted_snapshot = Some(lease.snapshot());
             guard.leases.insert(resource.clone(), lease);
         }
+        let inventory = LeaseInventorySnapshot::from_state(&guard);
+        let (active, pending, outstanding) = inventory.into_parts();
         drop(guard);
-        self.metrics.record_lease_release(queue_depth);
+        self.metrics
+            .update_lease_inventory(active, pending, outstanding);
         self.emit_event(TerritoryEvent::Released(snapshot.clone()));
         if let Some(granted) = granted_snapshot.clone() {
-            self.metrics
-                .record_lease_grant(queue_depth.saturating_sub(1));
+            self.metrics.record_lease_grant();
             self.emit_event(TerritoryEvent::Granted(granted));
         }
         Some(snapshot)
@@ -895,9 +834,12 @@ impl TerritoryManager {
         lease.last_heartbeat_at = now;
         lease.override_count += 1;
         let snapshot = lease.snapshot();
-        let queue_depth = guard.total_queue_depth();
+        let inventory = LeaseInventorySnapshot::from_state(&guard);
+        let (active, pending, outstanding) = inventory.into_parts();
         drop(guard);
-        self.metrics.record_lease_override(queue_depth);
+        self.metrics.record_lease_override();
+        self.metrics
+            .update_lease_inventory(active, pending, outstanding);
         self.emit_event(TerritoryEvent::Overridden {
             previous: previous_snapshot.clone(),
             lease: snapshot.clone(),
