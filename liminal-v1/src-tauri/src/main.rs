@@ -5,7 +5,7 @@ mod metrics;
 mod router;
 mod territory;
 
-use agent::AgentProcess;
+use agent::{AgentEvent, AgentEventSender, AgentProcess};
 use metrics::{MetricsCollector, PerformanceMetrics};
 use router::{Message, Priority, UnifiedMessageRouter};
 use std::collections::HashMap;
@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tauri::Emitter;
 use territory::{LeaseDecision, LeaseRequest, TerritoryManager};
+use tokio::sync::mpsc;
 
 #[tauri::command]
 async fn start_scenario(
@@ -165,6 +166,7 @@ async fn start_pty_scenario(
     territory_manager: tauri::State<'_, TerritoryManager>,
     agents: tauri::State<'_, Arc<Mutex<HashMap<String, AgentProcess>>>>,
     metrics: tauri::State<'_, MetricsCollector>,
+    event_sender: tauri::State<'_, AgentEventSender>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     println!("PTY Scenario Started with Real Processes!");
@@ -172,13 +174,22 @@ async fn start_pty_scenario(
     let agent_a_id = "Agent_A".to_string();
     let agent_b_id = "Agent_B".to_string();
     let resource = "shared_file.txt".to_string();
+    let pipe = event_sender.sender();
 
     let spawn_start = Instant::now();
-    let agent_a = AgentProcess::spawn(&agent_a_id, vec!["sh", "-c", "echo 'Agent A started'"]);
+    let agent_a = AgentProcess::spawn(
+        &agent_a_id,
+        vec!["sh", "-c", "echo 'Agent A started'"],
+        pipe.clone(),
+    );
     metrics.record_agent_spawn(spawn_start.elapsed().as_millis() as f64);
 
     let spawn_start_b = Instant::now();
-    let agent_b = AgentProcess::spawn(&agent_b_id, vec!["sh", "-c", "echo 'Agent B started'"]);
+    let agent_b = AgentProcess::spawn(
+        &agent_b_id,
+        vec!["sh", "-c", "echo 'Agent B started'"],
+        pipe.clone(),
+    );
     metrics.record_agent_spawn(spawn_start_b.elapsed().as_millis() as f64);
 
     {
@@ -331,12 +342,32 @@ fn main() {
     let router = UnifiedMessageRouter::with_metrics(metrics_collector.clone());
     let territory_manager = TerritoryManager::new(metrics_collector.clone());
     let agents: Arc<Mutex<HashMap<String, AgentProcess>>> = Arc::new(Mutex::new(HashMap::new()));
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    let event_sender = AgentEventSender::new(event_tx);
+    let mut event_rx = Some(event_rx);
+    let metrics_for_setup = metrics_collector.clone();
 
     tauri::Builder::default()
         .manage(router)
         .manage(territory_manager)
         .manage(agents)
         .manage(metrics_collector)
+        .manage(event_sender)
+        .setup(move |_app| {
+            let mut rx = event_rx.take().expect("agent event receiver missing");
+            let metrics = metrics_for_setup.clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    let name = event
+                        .event_name
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string());
+                    metrics.record_agent_event(&name);
+                    println!("[AgentEvent {}]: {}", event.agent_id, event.raw);
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             start_scenario,
             start_pty_scenario,

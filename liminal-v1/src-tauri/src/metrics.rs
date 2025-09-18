@@ -20,6 +20,7 @@ pub struct PerformanceMetrics {
     pub deferred_lease_requests: u64,
     pub lease_overrides: u64,
     pub lease_escalations: u64,
+    pub agent_events: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +47,7 @@ impl MetricsCollector {
                 deferred_lease_requests: 0,
                 lease_overrides: 0,
                 lease_escalations: 0,
+                agent_events: HashMap::new(),
             })),
             timers: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -122,6 +124,15 @@ impl MetricsCollector {
         metrics.agent_spawn_time_ms = duration_ms;
     }
 
+    pub fn record_agent_event(&self, event_name: &str) {
+        let mut metrics = self.metrics.write().unwrap();
+        let entry = metrics
+            .agent_events
+            .entry(event_name.to_string())
+            .or_insert(0);
+        *entry += 1;
+    }
+
     pub fn record_lease_acquisition(&self, duration_ms: f64) {
         let mut metrics = self.metrics.write().unwrap();
         metrics.total_leases_acquired += 1;
@@ -178,6 +189,7 @@ impl MetricsCollector {
             deferred_lease_requests: 0,
             lease_overrides: 0,
             lease_escalations: 0,
+            agent_events: HashMap::new(),
         };
     }
 }
