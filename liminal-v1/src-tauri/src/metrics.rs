@@ -80,6 +80,43 @@ pub struct MetricsSnapshot {
     pub leases: LeaseSnapshotSummary,
     pub pty: PtySnapshot,
     pub system: SystemSnapshot,
+    pub ledger: LedgerSnapshot,
+    pub consensus: ConsensusSnapshot,
+    pub heat: HeatSnapshot,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuorumMetricsUpdate {
+    pub resource_id: String,
+    pub achieved: bool,
+    pub threshold: f32,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HeatSummary {
+    pub hottest_resource: Option<String>,
+    pub hottest_score: f64,
+    pub tracked: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsensusSnapshot {
+    pub success: u64,
+    pub failure: u64,
+    pub threshold: f32,
+    pub success_ratio: f64,
+    pub last_resource: Option<String>,
+    pub last_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HeatSnapshot {
+    pub hottest_resource: Option<String>,
+    pub hottest_score: f64,
+    pub tracked: usize,
 }
 
 #[derive(Debug, Default)]
@@ -148,6 +185,47 @@ struct SystemState {
     last_updated: Option<SystemTime>,
 }
 
+#[derive(Debug, Default)]
+struct ConsensusState {
+    success: u64,
+    failure: u64,
+    threshold: f32,
+    last_resource: Option<String>,
+    last_reason: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct HeatState {
+    hottest_resource: Option<String>,
+    hottest_score: f64,
+    tracked: usize,
+}
+
+#[derive(Debug, Default)]
+struct LedgerState {
+    last_append_latency_ms: f64,
+    append_failures: u64,
+    integrity_errors: u64,
+}
+
+impl LedgerState {
+    fn to_snapshot(&self) -> LedgerSnapshot {
+        LedgerSnapshot {
+            last_append_latency_ms: self.last_append_latency_ms,
+            append_failures: self.append_failures,
+            integrity_errors: self.integrity_errors,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerSnapshot {
+    pub last_append_latency_ms: f64,
+    pub append_failures: u64,
+    pub integrity_errors: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct MetricsCollector {
     performance: Arc<RwLock<PerformanceState>>,
@@ -156,6 +234,9 @@ pub struct MetricsCollector {
     leases: Arc<RwLock<LeaseState>>,
     pty: Arc<RwLock<PtyState>>,
     system: Arc<RwLock<SystemState>>,
+    consensus: Arc<RwLock<ConsensusState>>,
+    heat: Arc<RwLock<HeatState>>,
+    ledger: Arc<RwLock<LedgerState>>,
     timers: Arc<RwLock<HashMap<String, Instant>>>,
 }
 
@@ -168,6 +249,9 @@ impl MetricsCollector {
             leases: Arc::new(RwLock::new(LeaseState::default())),
             pty: Arc::new(RwLock::new(PtyState::default())),
             system: Arc::new(RwLock::new(SystemState::default())),
+            consensus: Arc::new(RwLock::new(ConsensusState::default())),
+            heat: Arc::new(RwLock::new(HeatState::default())),
+            ledger: Arc::new(RwLock::new(LedgerState::default())),
             timers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -260,6 +344,45 @@ impl MetricsCollector {
             event_name: event_name.map(|value| value.to_string()),
             timestamp: SystemTime::now(),
         });
+    }
+
+    pub fn record_quorum_metrics(&self, update: QuorumMetricsUpdate) {
+        let mut consensus = self.consensus.write().unwrap();
+        if update.achieved {
+            consensus.success = consensus.success.saturating_add(1);
+        } else {
+            consensus.failure = consensus.failure.saturating_add(1);
+        }
+        consensus.threshold = update.threshold;
+        consensus.last_resource = Some(update.resource_id);
+        consensus.last_reason = Some(update.reason);
+    }
+
+    pub fn update_heat_summary(&self, summary: HeatSummary) {
+        let mut heat = self.heat.write().unwrap();
+        let HeatSummary {
+            hottest_resource,
+            hottest_score,
+            tracked,
+        } = summary;
+        heat.hottest_resource = hottest_resource;
+        heat.hottest_score = hottest_score;
+        heat.tracked = tracked;
+    }
+
+    pub fn record_ledger_append(&self, latency: Duration) {
+        let mut ledger = self.ledger.write().unwrap();
+        ledger.last_append_latency_ms = latency.as_secs_f64() * 1000.0;
+    }
+
+    pub fn record_ledger_error(&self) {
+        let mut ledger = self.ledger.write().unwrap();
+        ledger.append_failures = ledger.append_failures.saturating_add(1);
+    }
+
+    pub fn record_ledger_integrity_failure(&self) {
+        let mut ledger = self.ledger.write().unwrap();
+        ledger.integrity_errors = ledger.integrity_errors.saturating_add(1);
     }
 
     pub fn record_lease_acquisition(&self, duration_ms: f64) {
@@ -394,6 +517,38 @@ impl MetricsCollector {
             }
         };
 
+        let ledger_snapshot = {
+            let ledger = self.ledger.read().unwrap();
+            ledger.to_snapshot()
+        };
+
+        let consensus_snapshot = {
+            let consensus = self.consensus.read().unwrap();
+            let total = consensus.success + consensus.failure;
+            let ratio = if total > 0 {
+                consensus.success as f64 / total as f64
+            } else {
+                1.0
+            };
+            ConsensusSnapshot {
+                success: consensus.success,
+                failure: consensus.failure,
+                threshold: consensus.threshold,
+                success_ratio: ratio,
+                last_resource: consensus.last_resource.clone(),
+                last_reason: consensus.last_reason.clone(),
+            }
+        };
+
+        let heat_snapshot = {
+            let heat = self.heat.read().unwrap();
+            HeatSnapshot {
+                hottest_resource: heat.hottest_resource.clone(),
+                hottest_score: heat.hottest_score,
+                tracked: heat.tracked,
+            }
+        };
+
         MetricsSnapshot {
             performance: performance_snapshot,
             router: router_snapshot,
@@ -401,6 +556,9 @@ impl MetricsCollector {
             leases: leases_snapshot,
             pty: pty_snapshot,
             system: system_snapshot,
+            ledger: ledger_snapshot,
+            consensus: consensus_snapshot,
+            heat: heat_snapshot,
         }
     }
 
@@ -411,6 +569,9 @@ impl MetricsCollector {
         *self.leases.write().unwrap() = LeaseState::default();
         *self.pty.write().unwrap() = PtyState::default();
         *self.system.write().unwrap() = SystemState::default();
+        *self.consensus.write().unwrap() = ConsensusState::default();
+        *self.heat.write().unwrap() = HeatState::default();
+        *self.ledger.write().unwrap() = LedgerState::default();
         self.timers.write().unwrap().clear();
     }
 

@@ -1,6 +1,17 @@
 use crate::config::{parse_duration as parse_duration_str, RouterConfig};
+use crate::executor::MaintenanceExecutor;
 use crate::metrics::MetricsCollector;
+
+#[allow(unused_imports)]
+use crate::consensus::ConsensusBroker;
+
+#[allow(unused_imports)]
+use crate::ledger::{
+    LedgerEvent, LedgerWriter, RateLimitedRecord, RouterDispatchRecord, RouterEvent,
+};
+use blake3::hash as blake3_hash;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
@@ -183,7 +194,6 @@ impl TokenBucket {
     }
 
     fn try_consume(&mut self, cost: f64) -> bool {
-        self.refill();
         if self.tokens >= cost {
             self.tokens -= cost;
             true
@@ -192,12 +202,23 @@ impl TokenBucket {
         }
     }
 
-    fn refill(&mut self) {
-        let elapsed = self.last_refill.elapsed().as_secs_f64();
+    fn top_up(&mut self, now: Instant) {
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
         if elapsed > 0.0 {
             self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.capacity);
-            self.last_refill = Instant::now();
+            self.last_refill = now;
         }
+    }
+
+    fn snapshot(&self, now: Instant) -> (f64, f64, f64, Duration) {
+        (
+            self.tokens,
+            self.capacity,
+            self.refill_rate,
+            now.saturating_duration_since(self.last_refill),
+        )
     }
 }
 
@@ -212,26 +233,63 @@ pub struct UnifiedMessageRouter {
     token_buckets: Arc<RwLock<HashMap<String, TokenBucket>>>,
     metrics: MetricsCollector,
     dispatcher: Mutex<Option<JoinHandle<()>>>,
+    maintenance_executor: Mutex<Option<MaintenanceExecutor>>,
+    maintenance_started: AtomicBool,
     shutdown: watch::Sender<bool>,
     deliveries: broadcast::Sender<RouterDelivery>,
     config: DispatcherConfig,
+    ledger: Option<LedgerWriter>,
+    consensus: Option<ConsensusBroker>,
 }
 
 impl UnifiedMessageRouter {
     pub fn new() -> Self {
-        Self::with_config(MetricsCollector::new(), DispatcherConfig::default())
+        Self::build(
+            MetricsCollector::new(),
+            DispatcherConfig::default(),
+            None,
+            None,
+        )
     }
 
     pub fn with_metrics(metrics: MetricsCollector) -> Self {
-        Self::with_config(metrics, DispatcherConfig::default())
+        Self::build(metrics, DispatcherConfig::default(), None, None)
     }
 
     pub fn with_settings(metrics: MetricsCollector, router_config: Option<&RouterConfig>) -> Self {
         let dispatcher_config = DispatcherConfig::from_router_config(router_config);
-        Self::with_config(metrics, dispatcher_config)
+        Self::build(metrics, dispatcher_config, None, None)
+    }
+
+    pub fn with_settings_and_ledger(
+        metrics: MetricsCollector,
+        router_config: Option<&RouterConfig>,
+        ledger: Option<LedgerWriter>,
+    ) -> Self {
+        let dispatcher_config = DispatcherConfig::from_router_config(router_config);
+        Self::build(metrics, dispatcher_config, ledger, None)
+    }
+
+    pub fn with_settings_ledger_and_consensus(
+        metrics: MetricsCollector,
+        router_config: Option<&RouterConfig>,
+        ledger: Option<LedgerWriter>,
+        consensus: Option<ConsensusBroker>,
+    ) -> Self {
+        let dispatcher_config = DispatcherConfig::from_router_config(router_config);
+        Self::build(metrics, dispatcher_config, ledger, consensus)
     }
 
     pub fn with_config(metrics: MetricsCollector, config: DispatcherConfig) -> Self {
+        Self::build(metrics, config, None, None)
+    }
+
+    fn build(
+        metrics: MetricsCollector,
+        config: DispatcherConfig,
+        ledger: Option<LedgerWriter>,
+        consensus: Option<ConsensusBroker>,
+    ) -> Self {
         let queues = (0..PRIORITY_LEVELS)
             .map(|_| Arc::new(RwLock::new(VecDeque::new())))
             .collect();
@@ -245,9 +303,13 @@ impl UnifiedMessageRouter {
             token_buckets,
             metrics,
             dispatcher: Mutex::new(None),
+            maintenance_executor: Mutex::new(None),
+            maintenance_started: AtomicBool::new(false),
             shutdown,
             deliveries,
             config,
+            ledger,
+            consensus,
         }
     }
 
@@ -257,6 +319,17 @@ impl UnifiedMessageRouter {
 
     pub fn subscribe(&self) -> broadcast::Receiver<RouterDelivery> {
         self.deliveries.subscribe()
+    }
+
+    pub async fn set_maintenance_executor(&self, executor: MaintenanceExecutor) {
+        let mut guard = self.maintenance_executor.lock().await;
+        *guard = Some(executor);
+        drop(guard);
+        self.start_maintenance_if_needed().await;
+    }
+
+    pub async fn maintenance_executor(&self) -> Option<MaintenanceExecutor> {
+        self.maintenance_executor.lock().await.clone()
     }
 
     pub async fn route_message(&self, msg: Message) -> Result<(), RouteError> {
@@ -287,6 +360,8 @@ impl UnifiedMessageRouter {
     async fn ensure_dispatcher_started(&self) {
         let mut guard = self.dispatcher.lock().await;
         if guard.is_some() {
+            drop(guard);
+            self.start_maintenance_if_needed().await;
             return;
         }
         let queues = self.queues.iter().cloned().collect::<Vec<_>>();
@@ -296,6 +371,7 @@ impl UnifiedMessageRouter {
         let deliveries = self.deliveries.clone();
         let mut shutdown_rx = self.shutdown.subscribe();
         let config = self.config;
+        let ledger = self.ledger.clone();
         let handle = tokio::spawn(async move {
             run_dispatcher(
                 queues,
@@ -304,11 +380,107 @@ impl UnifiedMessageRouter {
                 metrics,
                 deliveries,
                 config,
+                ledger,
                 &mut shutdown_rx,
             )
             .await;
         });
         *guard = Some(handle);
+        drop(guard);
+        self.start_maintenance_if_needed().await;
+    }
+
+    async fn start_maintenance_if_needed(&self) {
+        if self.maintenance_started.load(Ordering::SeqCst) {
+            return;
+        }
+        let executor = {
+            let guard = self.maintenance_executor.lock().await;
+            guard.clone()
+        };
+        if let Some(executor) = executor {
+            if self
+                .maintenance_started
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                self.launch_maintenance_tasks(executor).await;
+            }
+        }
+    }
+
+    async fn launch_maintenance_tasks(&self, executor: MaintenanceExecutor) {
+        let queues = Arc::new(self.queues.iter().cloned().collect::<Vec<_>>());
+        let token_buckets = Arc::clone(&self.token_buckets);
+        let notify = Arc::clone(&self.notify);
+        let shutdown_sender = self.shutdown.clone();
+        let config = self.config;
+
+        {
+            let queues = Arc::clone(&queues);
+            let executor = executor.clone();
+            let notify = notify.clone();
+            let mut shutdown_rx = shutdown_sender.subscribe();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::cmp::max(
+                    config.aging_threshold,
+                    Duration::from_millis(20),
+                ));
+                loop {
+                    tokio::select! {
+                        result = shutdown_rx.changed() => {
+                            match result {
+                                Ok(_) => {
+                                    if *shutdown_rx.borrow() {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        _ = ticker.tick() => {
+                            let queues = Arc::clone(&queues);
+                            let notify = notify.clone();
+                            executor.spawn(async move {
+                                apply_aging(queues.as_ref(), config).await;
+                                notify.notify_waiters();
+                            });
+                        }
+                    }
+                }
+            });
+        }
+
+        {
+            let buckets = Arc::clone(&token_buckets);
+            let executor = executor.clone();
+            let notify = notify.clone();
+            let mut shutdown_rx = shutdown_sender.subscribe();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_millis(25));
+                loop {
+                    tokio::select! {
+                        result = shutdown_rx.changed() => {
+                            match result {
+                                Ok(_) => {
+                                    if *shutdown_rx.borrow() {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        _ = ticker.tick() => {
+                            let buckets = Arc::clone(&buckets);
+                            let notify = notify.clone();
+                            executor.spawn(async move {
+                                refill_all_token_buckets(buckets, notify).await;
+                            });
+                        }
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -330,13 +502,13 @@ async fn run_dispatcher(
     metrics: MetricsCollector,
     deliveries: broadcast::Sender<RouterDelivery>,
     config: DispatcherConfig,
+    ledger: Option<LedgerWriter>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) {
     loop {
         if *shutdown_rx.borrow() {
             break;
         }
-        apply_aging(&queues, config).await;
         let mut dispatched = false;
         for priority in (0..queues.len()).rev() {
             let maybe_message = {
@@ -345,7 +517,8 @@ async fn run_dispatcher(
             };
             if let Some(mut queued) = maybe_message {
                 let sender_id = queued.message.sender.clone();
-                let (should_dispatch, tokens_remaining, capacity, refill_rate, last_refill_elapsed) = {
+                let now = Instant::now();
+                let (should_dispatch, tokens_remaining, capacity, refill_rate, since_last_refill) = {
                     let mut buckets = token_buckets.write().await;
                     let bucket = buckets.entry(sender_id.clone()).or_insert_with(|| {
                         TokenBucket::new(
@@ -355,20 +528,18 @@ async fn run_dispatcher(
                         )
                     });
                     let dispatched = bucket.try_consume(queued.effective_priority.token_cost());
-                    let tokens_remaining = bucket.tokens;
-                    let capacity = bucket.capacity;
-                    let refill_rate = bucket.refill_rate;
-                    let last_refill_elapsed = bucket.last_refill.elapsed();
+                    let (tokens_remaining, capacity, refill_rate, since_last_refill) =
+                        bucket.snapshot(now);
                     (
                         dispatched,
                         tokens_remaining,
                         capacity,
                         refill_rate,
-                        last_refill_elapsed,
+                        since_last_refill,
                     )
                 };
                 let now = SystemTime::now();
-                let last_refill = now.checked_sub(last_refill_elapsed).unwrap_or(now);
+                let last_refill = now.checked_sub(since_last_refill).unwrap_or(now);
                 metrics.update_token_bucket(
                     &sender_id,
                     tokens_remaining,
@@ -377,6 +548,17 @@ async fn run_dispatcher(
                     Some(last_refill),
                 );
                 if !should_dispatch {
+                    let priority_label = queued.effective_priority.as_str().to_string();
+                    let rate_event = ledger.as_ref().map(|writer| {
+                        (
+                            writer.clone(),
+                            RateLimitedRecord {
+                                sender: sender_id.clone(),
+                                priority: priority_label,
+                                tokens_remaining,
+                            },
+                        )
+                    });
                     metrics.increment_rate_limited(&sender_id);
                     queued.record_attempt();
                     let index = queued.effective_priority.as_index();
@@ -385,6 +567,15 @@ async fn run_dispatcher(
                     drop(queue);
                     let depths = queue_depths(&queues).await;
                     metrics.update_queue_depths(&depths);
+                    if let Some((ledger_writer, record)) = rate_event {
+                        let event = LedgerEvent::Router(RouterEvent::RateLimited(record));
+                        let start = Instant::now();
+                        if ledger_writer.append_async(event).await.is_ok() {
+                            metrics.record_ledger_append(start.elapsed());
+                        } else {
+                            metrics.record_ledger_error();
+                        }
+                    }
                     continue;
                 }
                 let wait_time = queued.enqueued_at.elapsed();
@@ -397,6 +588,32 @@ async fn run_dispatcher(
                     aging_boosts: queued.aging_boosts,
                     retry_count: queued.retry_count,
                 };
+                let dispatch_event = ledger.as_ref().map(|writer| {
+                    (
+                        writer.clone(),
+                        RouterDispatchRecord {
+                            message_id: Some(format!(
+                                "{}-{}-{}",
+                                delivery.message.sender,
+                                delivery.message.recipient,
+                                delivery.retry_count
+                            )),
+                            content_digest: Some(
+                                blake3_hash(delivery.message.content.as_bytes())
+                                    .to_hex()
+                                    .to_string(),
+                            ),
+                            sender: delivery.message.sender.clone(),
+                            recipient: delivery.message.recipient.clone(),
+                            priority: delivery.message.priority.as_str().to_string(),
+                            effective_priority: delivery.effective_priority.as_str().to_string(),
+                            wait_time_ms: delivery.wait_time.as_millis() as u64,
+                            queue_depths: delivery.queue_depths.to_vec(),
+                            aging_boosts: delivery.aging_boosts,
+                            retry_count: delivery.retry_count,
+                        },
+                    )
+                });
                 let _ = deliveries.send(delivery.clone());
                 metrics.record_router_delivery(
                     queued.effective_priority,
@@ -404,6 +621,15 @@ async fn run_dispatcher(
                     &delivery.queue_depths,
                 );
                 metrics.update_queue_depths(&delivery.queue_depths);
+                if let Some((ledger_writer, record)) = dispatch_event {
+                    let event = LedgerEvent::Router(RouterEvent::Dispatched(record));
+                    let start = Instant::now();
+                    if ledger_writer.append_async(event).await.is_ok() {
+                        metrics.record_ledger_append(start.elapsed());
+                    } else {
+                        metrics.record_ledger_error();
+                    }
+                }
                 dispatched = true;
                 break;
             }
@@ -428,6 +654,22 @@ async fn queue_depths(queues: &[Arc<RwLock<VecDeque<QueuedMessage>>>]) -> [usize
         depths[index] = queue.read().await.len();
     }
     depths
+}
+
+async fn refill_all_token_buckets(
+    token_buckets: Arc<RwLock<HashMap<String, TokenBucket>>>,
+    notify: Arc<Notify>,
+) {
+    let mut buckets = token_buckets.write().await;
+    if buckets.is_empty() {
+        return;
+    }
+    let now = Instant::now();
+    for bucket in buckets.values_mut() {
+        bucket.top_up(now);
+    }
+    drop(buckets);
+    notify.notify_waiters();
 }
 
 async fn apply_aging(queues: &[Arc<RwLock<VecDeque<QueuedMessage>>>], config: DispatcherConfig) {

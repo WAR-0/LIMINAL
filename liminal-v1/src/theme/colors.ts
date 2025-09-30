@@ -1,0 +1,63 @@
+export const colors = {
+  background: {
+    primary: '#0a0e1a',
+    secondary: '#0f1726',
+    tertiary: '#1a2332',
+    chat: '#0d1420',
+  },
+  text: {
+    primary: '#e8eaed',
+    secondary: '#9ca3af',
+    muted: '#6b7280',
+  },
+  border: {
+    default: '#1f2937',
+    subtle: '#161e2e',
+  },
+  agent: {
+    m3: '#f38ba8',
+    light: '#89dceb',
+    dark: '#89b4fa',
+    grey: '#6b7280',
+    explorer: '#89dceb',
+    builder: '#a6e3a1',
+    analyzer: '#cba6f7',
+    director: '#f9e2af',
+  },
+  status: {
+    accent: '#cba6f7',
+    success: '#a6e3a1',
+    warning: '#f9e2af',
+    error: '#f38ba8',
+  },
+  ui: {
+    focus: '#3b82f6',
+    hover: '#1e293b',
+  },
+  terminal: {
+    foreground: '#cdd6f4',
+    background: '#1e1e2e',
+    cursor: '#cba6f7',
+    cursorAccent: '#1e1e2e',
+    selectionBackground: '#585b70',
+    selectionForeground: '#cdd6f4',
+    black: '#45475a',
+    red: '#f38ba8',
+    green: '#a6e3a1',
+    yellow: '#f9e2af',
+    blue: '#89b4fa',
+    magenta: '#cba6f7',
+    cyan: '#89dceb',
+    white: '#bac2de',
+    brightBlack: '#585b70',
+    brightRed: '#f38ba8',
+    brightGreen: '#a6e3a1',
+    brightYellow: '#f9e2af',
+    brightBlue: '#89b4fa',
+    brightMagenta: '#cba6f7',
+    brightCyan: '#89dceb',
+    brightWhite: '#cdd6f4',
+  },
+} as const;
+
+export type Colors = typeof colors;

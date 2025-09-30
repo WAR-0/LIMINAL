@@ -79,6 +79,10 @@ territory_config:
   max_lease_duration: 3600s         # 1 hour
   # If a lease has less than this time remaining, the system may try to auto-extend it.
   auto_extend_threshold: 60s
+  consensus_threshold: 0.66
+  heat_decay_per_second: 0.2
+  heat_increment: 1.5
+  heat_max: 12.0
 
   # Parameters for lease negotiation between agents.
   negotiation:
@@ -100,6 +104,17 @@ territory_config:
     starvation_threshold: 600s      # 10 minutes
     # Time after which a waiting agent's request priority is boosted.
     priority_boost_after: 300s      # 5 minutes
+
+# ------------------------------------------------------------------------------
+# Ledger Configuration (`consensus_ledger_design.md`)
+# ------------------------------------------------------------------------------
+ledger:
+  rootPath: ledger
+  segmentSizeBytes: 5242880
+  segmentDurationSecs: 60
+  checkpointIntervalSecs: 30
+  retainEpochs: 7
+  retainDays: 30
 
 # ------------------------------------------------------------------------------
 # System Health KPIs (`01_agent_capabilities.md`)
@@ -130,11 +145,15 @@ health_monitoring_kpis:
     warning: 1-5/min
     critical: > 5/min
 
-  # Consensus success rate targets.
+  # Consensus success rate thresholds.
   consensus_success:
-    target: > 90%
-    warning: 70-90%
-    critical: < 70%
+    warning_ratio: 0.85
+    critical_ratio: 0.7
+
+  # Heat hotspot thresholds (stigmergic intensity).
+  heat_hotspot:
+    warning: 5.0
+    critical: 8.0
 
   # Deadlock frequency targets.
   deadlock_frequency:

@@ -39,7 +39,7 @@
 - Always author commits as WAR-0 and omit AI/specialist attribution. Configure once per repo:
   ```bash
   git config user.name "WAR-0"
-  git config user.email "war0@liminal.dev"
+  git config user.email "warcodes@proton.me"
   git config commit.gpgsign false
   ```
 - Draft clear messages explaining intent so history stays readable when multiple agents contribute.

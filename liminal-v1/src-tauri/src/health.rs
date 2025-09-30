@@ -1,5 +1,6 @@
 use crate::config::{
-    DeadlockFrequencyConfig, EscalationRateConfig, HealthMonitoringConfig, QueueHealthConfig,
+    ConsensusSuccessConfig, DeadlockFrequencyConfig, EscalationRateConfig, HealthMonitoringConfig,
+    HeatHotspotConfig, QueueHealthConfig,
 };
 use crate::metrics::MetricsSnapshot;
 use serde::Serialize;
@@ -30,6 +31,10 @@ pub struct HealthMonitor {
     escalation_critical_per_min: Option<f64>,
     deadlock_warning_per_hour: Option<f64>,
     deadlock_critical_per_hour: Option<f64>,
+    consensus_warning_ratio: Option<f64>,
+    consensus_critical_ratio: Option<f64>,
+    heat_warning: Option<f64>,
+    heat_critical: Option<f64>,
     last_snapshot_at: Option<Instant>,
     last_rate_limited: u64,
     last_escalations: u64,
@@ -37,6 +42,8 @@ pub struct HealthMonitor {
     rate_limit_severity: Severity,
     escalation_severity: Severity,
     deadlock_severity: Severity,
+    consensus_severity: Severity,
+    heat_severity: Severity,
 }
 
 impl HealthMonitor {
@@ -49,6 +56,10 @@ impl HealthMonitor {
             escalation_critical_per_min: None,
             deadlock_warning_per_hour: None,
             deadlock_critical_per_hour: None,
+            consensus_warning_ratio: None,
+            consensus_critical_ratio: None,
+            heat_warning: None,
+            heat_critical: None,
             last_snapshot_at: None,
             last_rate_limited: 0,
             last_escalations: 0,
@@ -56,12 +67,16 @@ impl HealthMonitor {
             rate_limit_severity: Severity::Normal,
             escalation_severity: Severity::Normal,
             deadlock_severity: Severity::Normal,
+            consensus_severity: Severity::Normal,
+            heat_severity: Severity::Normal,
         };
 
         if let Some(cfg) = config {
             monitor.apply_queue_config(cfg.queue_health.as_ref());
             monitor.apply_escalation_config(cfg.escalation_rate.as_ref());
             monitor.apply_deadlock_config(cfg.deadlock_frequency.as_ref());
+            monitor.apply_consensus_config(cfg.consensus_success.as_ref());
+            monitor.apply_heat_config(cfg.heat_hotspot.as_ref());
         }
 
         monitor
@@ -104,6 +119,20 @@ impl HealthMonitor {
         }
     }
 
+    fn apply_consensus_config(&mut self, config: Option<&ConsensusSuccessConfig>) {
+        if let Some(consensus) = config {
+            self.consensus_warning_ratio = consensus.warning_ratio;
+            self.consensus_critical_ratio = consensus.critical_ratio;
+        }
+    }
+
+    fn apply_heat_config(&mut self, config: Option<&HeatHotspotConfig>) {
+        if let Some(heat) = config {
+            self.heat_warning = heat.warning;
+            self.heat_critical = heat.critical;
+        }
+    }
+
     pub fn evaluate(&mut self, snapshot: &MetricsSnapshot) -> Vec<HealthAlert> {
         let mut alerts = Vec::new();
         let now = Instant::now();
@@ -126,6 +155,14 @@ impl HealthMonitor {
             if let Some(alert) = self.evaluate_deadlocks(snapshot, elapsed) {
                 alerts.push(alert);
             }
+        }
+
+        if let Some(alert) = self.evaluate_consensus(snapshot) {
+            alerts.push(alert);
+        }
+
+        if let Some(alert) = self.evaluate_heat(snapshot) {
+            alerts.push(alert);
         }
 
         self.last_snapshot_at = Some(now);
@@ -336,6 +373,95 @@ impl HealthMonitor {
             });
         } else if severity == Severity::Normal {
             self.deadlock_severity = Severity::Normal;
+        }
+        None
+    }
+
+    fn evaluate_consensus(&mut self, snapshot: &MetricsSnapshot) -> Option<HealthAlert> {
+        if self.consensus_warning_ratio.is_none() && self.consensus_critical_ratio.is_none() {
+            return None;
+        }
+        let ratio = snapshot.consensus.success_ratio;
+        let mut severity = Severity::Normal;
+        if let Some(critical) = self.consensus_critical_ratio {
+            if ratio <= critical {
+                severity = Severity::Critical;
+            }
+        }
+        if severity != Severity::Critical {
+            if let Some(warning) = self.consensus_warning_ratio {
+                if ratio <= warning {
+                    severity = Severity::Warning;
+                }
+            }
+        }
+        if severity > self.consensus_severity {
+            self.consensus_severity = severity;
+            if severity != Severity::Normal {
+                return Some(HealthAlert {
+                    severity: severity_to_str(severity).to_string(),
+                    message: format!("Consensus success ratio {:.2} below threshold", ratio),
+                    context: json!({
+                        "success": snapshot.consensus.success,
+                        "failure": snapshot.consensus.failure,
+                        "ratio": ratio,
+                        "threshold": snapshot.consensus.threshold,
+                        "lastResource": snapshot.consensus.last_resource,
+                        "lastReason": snapshot.consensus.last_reason,
+                        "warningRatio": self.consensus_warning_ratio,
+                        "criticalRatio": self.consensus_critical_ratio,
+                    }),
+                });
+            }
+        } else if severity == Severity::Normal {
+            self.consensus_severity = Severity::Normal;
+        }
+        None
+    }
+
+    fn evaluate_heat(&mut self, snapshot: &MetricsSnapshot) -> Option<HealthAlert> {
+        if self.heat_warning.is_none() && self.heat_critical.is_none() {
+            return None;
+        }
+        let score = snapshot.heat.hottest_score;
+        let mut severity = Severity::Normal;
+        if let Some(critical) = self.heat_critical {
+            if score >= critical {
+                severity = Severity::Critical;
+            }
+        }
+        if severity != Severity::Critical {
+            if let Some(warning) = self.heat_warning {
+                if score >= warning {
+                    severity = Severity::Warning;
+                }
+            }
+        }
+        if severity > self.heat_severity {
+            self.heat_severity = severity;
+            if severity != Severity::Normal {
+                return Some(HealthAlert {
+                    severity: severity_to_str(severity).to_string(),
+                    message: format!(
+                        "Heat score {:.2} exceeded threshold for resource {}",
+                        score,
+                        snapshot
+                            .heat
+                            .hottest_resource
+                            .as_deref()
+                            .unwrap_or("unknown")
+                    ),
+                    context: json!({
+                        "hottestResource": snapshot.heat.hottest_resource,
+                        "score": score,
+                        "tracked": snapshot.heat.tracked,
+                        "warning": self.heat_warning,
+                        "critical": self.heat_critical,
+                    }),
+                });
+            }
+        } else if severity == Severity::Normal {
+            self.heat_severity = Severity::Normal;
         }
         None
     }
