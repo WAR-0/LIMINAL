@@ -50,8 +50,8 @@ async fn test_runbook_executor_basic() {
     let metrics = MetricsCollector::new();
     let router = UnifiedMessageRouter::new();
 
-    let mut executor = RunbookExecutor::new(working_dir.clone(), metrics, router, 3);
-    let mut rx = executor.subscribe();
+    let executor = RunbookExecutor::new(working_dir.clone(), metrics, router, 3);
+    let _rx = executor.subscribe();
 
     let runbook_path = create_test_runbook(&temp_dir);
     let load_result = executor.load_runbook(&runbook_path).await;
@@ -118,7 +118,7 @@ async fn test_runbook_executor_max_parallel() {
     let metrics = MetricsCollector::new();
     let router = UnifiedMessageRouter::new();
 
-    let executor = RunbookExecutor::new(working_dir.clone(), metrics, router).with_max_parallel(5);
+    let executor = RunbookExecutor::new(working_dir.clone(), metrics, router, 5);
 
     let runbook_path = create_test_runbook(&temp_dir);
     let load_result = executor.load_runbook(&runbook_path).await;
@@ -134,9 +134,9 @@ fn test_execution_event_serialization() {
     };
 
     let json = serde_json::to_string(&event).expect("Failed to serialize");
-    assert!(json.contains("RunbookStarted"));
-    assert!(json.contains("test"));
-    assert!(json.contains("2"));
+    assert!(json.contains("\"type\":\"runbookStarted\""));
+    assert!(json.contains("\"epochId\":\"test\"") || json.contains("\"epoch_id\":\"test\""));
+    assert!(json.contains("\"totalTurns\":2") || json.contains("\"total_turns\":2"));
 }
 
 #[test]
